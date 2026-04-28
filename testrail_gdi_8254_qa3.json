@@ -1,0 +1,77 @@
+﻿[
+  {
+    "title": "GDI-8254 - Aprobar transferencia enviada",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existe una transferencia enviada pendiente de aprobacion.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias.",
+      "Ubicar una transferencia enviada pendiente.",
+      "Abrir el detalle de la transferencia.",
+      "Aprobar la transferencia.",
+      "Guardar o confirmar la aprobacion."
+    ],
+    "expected_result": "La transferencia queda aprobada sin error y el comprobante fiscal asociado no presenta salto inconsistente de secuencia.",
+    "impact": "directo"
+  },
+  {
+    "title": "GDI-8254 - Consultar transferencia enviada aprobada",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existe una transferencia enviada previamente aprobada.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias.",
+      "Buscar una transferencia enviada aprobada.",
+      "Abrir el detalle o consulta de la transferencia.",
+      "Revisar el estado final y los datos visibles del registro."
+    ],
+    "expected_result": "La transferencia aprobada se consulta correctamente, conserva su estado esperado y no muestra inconsistencias funcionales asociadas al comprobante fiscal.",
+    "impact": "directo"
+  },
+  {
+    "title": "GDI-8254 - Aprobar dos transferencias enviadas consecutivas",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existen dos transferencias enviadas pendientes de aprobacion.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias.",
+      "Aprobar la primera transferencia enviada pendiente.",
+      "Aprobar la segunda transferencia enviada pendiente.",
+      "Revisar ambas operaciones aprobadas."
+    ],
+    "expected_result": "Las dos transferencias quedan aprobadas correctamente y la continuidad de la secuencia fiscal asociada se mantiene sin saltos indebidos.",
+    "impact": "directo"
+  },
+  {
+    "title": "GDI-8254 - Aprobar transferencia recibida VIP",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existe una transferencia recibida o VIP pendiente de aprobacion.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.",
+      "Ubicar una transferencia recibida o VIP pendiente.",
+      "Abrir el detalle de la transferencia.",
+      "Aprobar la transferencia.",
+      "Guardar o confirmar la aprobacion."
+    ],
+    "expected_result": "La transferencia queda aprobada sin error y el comprobante fiscal asociado no presenta salto inconsistente de secuencia.",
+    "impact": "directo"
+  },
+  {
+    "title": "GDI-8254 - Ejecutar devolucion de transferencia recibida",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existe una transferencia recibida con condiciones para devolucion o reverso segun el flujo funcional habilitado.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.",
+      "Ubicar la transferencia recibida correspondiente.",
+      "Ejecutar la devolucion o reverso disponible en el flujo funcional.",
+      "Confirmar la operacion.",
+      "Consultar el resultado final del registro."
+    ],
+    "expected_result": "La devolucion o reverso se procesa sin error funcional y no deja inconsistencias visibles relacionadas con la secuencia fiscal.",
+    "impact": "directo"
+  },
+  {
+    "title": "GDI-8254 - Aprobar dos transferencias recibidas consecutivas",
+    "preconditions": "Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existen dos transferencias recibidas pendientes de aprobacion.",
+    "steps": [
+      "Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.",
+      "Aprobar la primera transferencia recibida pendiente.",
+      "Aprobar la segunda transferencia recibida pendiente.",
+      "Revisar ambas operaciones aprobadas."
+    ],
+    "expected_result": "Las dos transferencias quedan aprobadas correctamente y la continuidad de la secuencia fiscal asociada se mantiene sin saltos indebidos.",
+    "impact": "directo"
+  }
+]

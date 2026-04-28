@@ -1,0 +1,134 @@
+# Claude Code ignore list (minimize context/tokens)
+# Keep this focused on source code and lightweight config files.
+
+# =========================
+# Dependencies
+# =========================
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/
+.yarn/cache/
+
+# =========================
+# Playwright artifacts
+# =========================
+artifacts/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+playwright/.auth/
+playwright/videos/
+playwright/screenshots/
+trace/
+*.trace
+
+# =========================
+# Local browser profiles
+# =========================
+profile*/
+profiles/
+artifacts/profiles/
+user-data-dir/
+
+# =========================
+# Runner logs / outputs
+# =========================
+outputs/
+logs/
+*.log
+
+# =========================
+# Evidences / screenshots / media
+# =========================
+evidencias*/
+screenshots/
+videos/
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.tiff
+*.svg
+
+# Video
+*.mp4
+*.webm
+*.mov
+*.avi
+*.mkv
+
+# Documents / binary artifacts
+*.pdf
+*.xlsx
+*.docx
+*.pptx
+*.csv
+
+# =========================
+# Archives
+# =========================
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.tgz
+
+# =========================
+# Coverage / build outputs
+# =========================
+coverage/
+dist/
+build/
+out/
+tmp/
+temp/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+*.map
+
+# =========================
+# Auth / session artifacts
+# =========================
+auth.json
+docs/legacy/auth*.json
+*.session.json
+*.token
+
+# =========================
+# Playwright cache / misc
+# =========================
+.cache/
+.cache-loader/
+
+# =========================
+# OS / editor noise
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+.idea/
+
+# =========================
+# Git / CI artifacts
+# =========================
+.git/
+.github/
+.gitlab/
+.gitlab-ci.yml
+
+# =========================
+# Misc binaries
+# =========================
+*.exe
+*.dll
+*.so
+*.dylib

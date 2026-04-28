@@ -1,0 +1,23 @@
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# Artifacts (local-only)
+/artifacts/
+/evidencias_tmp/
+/outputs/
+
+# Local browser profiles (very large)
+/profile*/
+/profile-edge-robot*/
+
+# Logs
+*.log
+
+# Office temp files
+~$*.xlsx

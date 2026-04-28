@@ -1,0 +1,24 @@
+{
+  "name": "portalcomercial",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "seed:edge-profile": "powershell -ExecutionPolicy Bypass -File .\\scripts\\seed-edge-profile.ps1",
+    "robot": ".\\scripts\\run-robot-gui.cmd",
+    "robot:gui": ".\\scripts\\run-robot-gui.cmd",
+    "cedulas:gui": ".\\scripts\\run-cedulas-gui.cmd"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.1"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "xlsx": "^0.18.5"
+  }
+}

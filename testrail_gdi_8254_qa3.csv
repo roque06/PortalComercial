@@ -1,0 +1,28 @@
+﻿Title,Preconditions,Steps,Expected Result,Type,Priority,Estado
+GDI-8254 - Aprobar transferencia enviada,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existe una transferencia enviada pendiente de aprobacion.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias.
+2. Ubicar una transferencia enviada pendiente.
+3. Abrir el detalle de la transferencia.
+4. Aprobar la transferencia.
+5. Guardar o confirmar la aprobacion.",La transferencia queda aprobada sin error y el comprobante fiscal asociado no presenta salto inconsistente de secuencia.,Funcional,Alta,Pendiente
+GDI-8254 - Consultar transferencia enviada aprobada,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existe una transferencia enviada previamente aprobada.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias.
+2. Buscar una transferencia enviada aprobada.
+3. Abrir el detalle o consulta de la transferencia.
+4. Revisar el estado final y los datos visibles del registro.","La transferencia aprobada se consulta correctamente, conserva su estado esperado y no muestra inconsistencias funcionales asociadas al comprobante fiscal.",Funcional,Alta,Pendiente
+GDI-8254 - Aprobar dos transferencias enviadas consecutivas,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias. Existen dos transferencias enviadas pendientes de aprobacion.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias.
+2. Aprobar la primera transferencia enviada pendiente.
+3. Aprobar la segunda transferencia enviada pendiente.
+4. Revisar ambas operaciones aprobadas.",Las dos transferencias quedan aprobadas correctamente y la continuidad de la secuencia fiscal asociada se mantiene sin saltos indebidos.,Funcional,Alta,Pendiente
+GDI-8254 - Aprobar transferencia recibida VIP,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existe una transferencia recibida o VIP pendiente de aprobacion.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.
+2. Ubicar una transferencia recibida o VIP pendiente.
+3. Abrir el detalle de la transferencia.
+4. Aprobar la transferencia.
+5. Guardar o confirmar la aprobacion.",La transferencia queda aprobada sin error y el comprobante fiscal asociado no presenta salto inconsistente de secuencia.,Funcional,Alta,Pendiente
+GDI-8254 - Ejecutar devolucion de transferencia recibida,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existe una transferencia recibida con condiciones para devolucion o reverso segun el flujo funcional habilitado.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.
+2. Ubicar la transferencia recibida correspondiente.
+3. Ejecutar la devolucion o reverso disponible en el flujo funcional.
+4. Confirmar la operacion.
+5. Consultar el resultado final del registro.",La devolucion o reverso se procesa sin error funcional y no deja inconsistencias visibles relacionadas con la secuencia fiscal.,Funcional,Alta,Pendiente
+GDI-8254 - Aprobar dos transferencias recibidas consecutivas,Instancia QA3 disponible. Usuario activo con acceso a Revision y/o Aprobacion Transferencias VIP. Existen dos transferencias recibidas pendientes de aprobacion.,"1. Ingresar a la pantalla Revision y/o Aprobacion Transferencias VIP.
+2. Aprobar la primera transferencia recibida pendiente.
+3. Aprobar la segunda transferencia recibida pendiente.
+4. Revisar ambas operaciones aprobadas.",Las dos transferencias quedan aprobadas correctamente y la continuidad de la secuencia fiscal asociada se mantiene sin saltos indebidos.,Funcional,Alta,Pendiente

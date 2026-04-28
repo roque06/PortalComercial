@@ -1,0 +1,68 @@
+Usa la skill oracle-cierre-dba.
+
+Revisa la base: QA7
+Baseline de comparacion: QA3
+Usuario: system
+Contrasena: system
+
+Contexto del problema:
+Al ejecutar los f5 cod proceso 21 me indica que tengo asientos incompletos
+
+Sistema de cierre: F5
+Proceso de cierre: 21
+
+Error mostrado por la web o por la aplicacion:
+
+CG-000264.CG-000264 Existe asientos incompletos para la unidad @. Proceso no sera realizado.CG-000264.CG-000264 Existe asientos incompletos para la unidad @. Proceso no sera realizado.
+
+Que necesito:
+1. Diagnostica la causa en la DB.
+2. Compara contra QA3.
+3. Revisa jobs, scheduler, PA_PROCESO_CIERRE, PA_BITACORA_PROCESO_CIERRE y PA_ERRORES_PROCESO_CIERRE.
+4. Si el problema es seguro de corregir y es de configuracion tecnica, aplica el fix.
+5. Dime al final que encontraste, que corregiste y si ya puedo correr el cierre otra vez.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------------------------------------------------------------------------------------
+Version corta:
+
+Usa la skill oracle-cierre-dba y revisa [NOMBRE_DB].
+Compara contra QA3.
+Sistema: [COD_SISTEMA]
+Proceso: [COD_PROCESO]
+Error: [ERROR]
+Diagnostica, corrige lo seguro y dime si ya puedo relanzar el cierre.
+
+Ejemplo:
+
+Usa la skill oracle-cierre-dba y revisa QA12.
+Compara contra QA3.
+Sistema: F5
+Proceso: 4
+Error: El job JOB_ACTUALIZAR_SALDOS_CG no se completo. Su estado es DISABLED. Motivo: ORA-02248 invalid option for ALTER SESSION.
+Diagnostica, corrige lo seguro y dime si ya puedo relanzar el cierre.
