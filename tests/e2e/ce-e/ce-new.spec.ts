@@ -109,9 +109,12 @@ async function clickContinuarDesdeVerificacionAprobada(
     const inicio = Date.now();
 
     while (Date.now() - inicio < timeoutMs) {
-        await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+        const modalSalidaAntesClick = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+        if (modalSalidaAntesClick) {
+            throw new Error(`[CRITICO] Se detecto el modal 'Salir del proceso de solicitud' antes de Continuar (${contexto}). Se cancelo el modal para evitar salir por error.`);
+        }
 
-        const candidatos = page.getByRole('button', { name: /^Continuar\b/i });
+        const candidatos = page.getByRole('button', { name: /^Continuar$/i });
         const total = await candidatos.count().catch(() => 0);
         let mejorIndice = -1;
         let mejorX = -1;
@@ -156,13 +159,56 @@ async function clickContinuarDesdeVerificacionAprobada(
         await page.waitForTimeout(FAST_UI ? 220 : 500);
         const modalSalidaAbierto = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         if (modalSalidaAbierto) {
-            console.log(`[Cumplimiento][WARN] Se abrio el modal de salida al intentar Continuar (${contexto}). Reintentando...`);
-            await page.waitForTimeout(FAST_UI ? 220 : 600);
-            continue;
+            throw new Error(`[CRITICO] Se abrio el modal 'Salir del proceso de solicitud' al intentar Continuar (${contexto}). Se cancelo el modal para evitar salir por error.`);
         }
 
         console.log(`[Cumplimiento] Click en Continuar (${contexto}).`);
         return true;
+    }
+
+    return false;
+}
+
+async function esperarPortalEstableDespuesOfac(page: Page, timeoutMs = FAST_UI ? 16000 : 26000) {
+    const inicio = Date.now();
+    const textosGuardado = page.getByText(/Guardando informaci[oó]n|Informaci[oó]n guardada|Actualizando solicitud/i).first();
+    const overlays = page.locator(
+        '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible'
+    );
+
+    while (Date.now() - inicio < timeoutMs) {
+        const modalSalidaAbierto = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+        if (modalSalidaAbierto) {
+            throw new Error("[CRITICO] Se detecto el modal 'Salir del proceso de solicitud' durante la estabilizacion post-OFAC.");
+        }
+
+        const guardandoVisible = await textosGuardado.isVisible().catch(() => false);
+        const overlayCount = await overlays.count().catch(() => 0);
+        if (!guardandoVisible && overlayCount === 0) return true;
+
+        await page.waitForTimeout(FAST_UI ? 250 : 500);
+    }
+
+    return false;
+}
+
+async function detectarPantallaPostProductoReal(page: Page) {
+    const body = (await page.locator('body').innerText().catch(() => '')) || '';
+    if (/Nivel de estudio|Reside actualmente en la Rep(?:u|ú)blica Dominicana|Posee otras identificaciones o nacionalidades|A(?:ñ|n)adir dirección|Direccion|Dirección|Referencia personal/i.test(body)) {
+        return true;
+    }
+
+    const marcadores: Locator[] = [
+        page.getByText(/Nivel de estudio/i).first(),
+        page.getByText(/Reside actualmente en la Rep(?:u|ú)blica Dominicana/i).first(),
+        page.getByText(/Posee otras identificaciones o nacionalidades/i).first(),
+        page.getByRole('button', { name: /A(?:ñ|n)adir direcci(?:o|ó)n/i }).first(),
+        page.getByText(/Referencia personal/i).first(),
+    ];
+
+    for (const marcador of marcadores) {
+        if (await marcador.isVisible().catch(() => false)) return true;
+        if (await marcador.waitFor({ state: 'attached', timeout: 250 }).then(() => true).catch(() => false)) return true;
     }
 
     return false;
@@ -332,7 +378,7 @@ async function clickContinuarRobusto(
     return false;
 }
 
-type ResultadoAvanceRelacionados = 'taller' | 'productos' | 'gestion-documental' | 'sin-cambio';
+type ResultadoAvanceRelacionados = 'taller' | 'productos' | 'gestion-documental' | 'post-producto' | 'sin-cambio';
 
 async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string) {
     const timeoutMs = 90000;
@@ -342,20 +388,28 @@ async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string)
         .locator('.p-panel .p-panel-icons button:visible, [data-pc-name="panel"] [data-pc-section="icons"] button:visible')
         .first();
 
+    await page.bringToFront().catch(() => { });
+    console.log('[Cumplimiento] Portal al frente después de OFAC');
+    console.log('[Cumplimiento] Recargando solicitud después de OFAC');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: FAST_UI ? 20000 : 40000 }).catch(() => { });
+    console.log('[Cumplimiento] Esperando portal estable después de reload');
+    await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
+    await esperarPortalEstableDespuesOfac(page).catch((e) => { throw e; });
+
+    const modalSalidaTrasReloadInicial = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+    if (modalSalidaTrasReloadInicial) {
+        throw new Error("[CRITICO] Se detecto el modal 'Salir del proceso de solicitud' despues de recargar post-OFAC.");
+    }
+
     while (Date.now() - inicio < timeoutMs) {
         const aprobadoVisible = await estadoAprobado.isVisible().catch(() => false);
         if (aprobadoVisible) {
-            console.log(`[Cumplimiento] Estado Aprobado confirmado en portal${mpn ? ` para ${mpn}` : ''}.`);
-
-            console.log(`[Cumplimiento] Recargando portal antes de Continuar${mpn ? ` para ${mpn}` : ''}.`);
-            await page.reload({ waitUntil: 'domcontentloaded', timeout: FAST_UI ? 20000 : 40000 }).catch(() => { });
-            await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
-            await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+            console.log(`[Cumplimiento] Estado Aprobado confirmado${mpn ? ` para ${mpn}` : ''}.`);
 
             const aprobadoTrasRecarga = await page
                 .waitForFunction(
                     () => /Aprobado/i.test(document.body?.innerText || ''),
-                    { timeout: FAST_UI ? 12000 : 22000 }
+                    { timeout: FAST_UI ? 1800 : 3000 }
                 )
                 .then(() => true)
                 .catch(() => false);
@@ -365,39 +419,41 @@ async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string)
                 await page.waitForTimeout(FAST_UI ? 800 : 1600);
                 continue;
             }
+            console.log('[Cumplimiento] Estado Aprobado confirmado');
 
+            console.log('[Cumplimiento] Buscando botón Continuar correcto');
             const clicContinuar = await clickContinuarDesdeVerificacionAprobada(
                 page,
-                `cumplimiento aprobado${mpn ? ` ${mpn}` : ''}`,
-                FAST_UI ? 12000 : 22000
+                'post-OFAC',
+                FAST_UI ? 5000 : 8000
             );
             if (!clicContinuar) {
                 throw new Error("[CRITICO] No se pudo hacer click en 'Continuar' despues de aprobar Cumplimiento.");
             }
+            console.log('[Cumplimiento] Click en Continuar post-OFAC');
             await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
+            await esperarPortalEstableDespuesOfac(page).catch((e) => { throw e; });
 
-            const salioDeCumplimiento = await page.waitForFunction(
-                () => {
-                    const body = document.body?.innerText || '';
-                    const sinBadgeCumplimiento = !/Verificaciones\s*-\s*Cumplimiento/i.test(body);
-                    const enPantallaPostProducto =
-                        /Nivel de estudio/i.test(body) ||
-                        /Referencia personal/i.test(body) ||
-                        /Posee otras identificaciones o nacionalidades/i.test(body) ||
-                        /Añadir dirección|Anadir dirección/i.test(body);
-                    const enProductos = /Categor[ií]a de producto/i.test(body);
-                    const enTaller = /Prop[oó]sito/i.test(body) && /Monto inicial/i.test(body);
-                    return sinBadgeCumplimiento || enPantallaPostProducto || enProductos || enTaller;
-                },
-                { timeout: FAST_UI ? 12000 : 22000 }
-            ).then(() => true).catch(() => false);
-
-            if (salioDeCumplimiento) {
-                console.log(`[Cumplimiento] Salida de pantalla de verificacion confirmada${mpn ? ` para ${mpn}` : ''}.`);
-                return true;
+            const modalSalidaTrasContinuar = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+            if (modalSalidaTrasContinuar) {
+                throw new Error("[CRITICO] Se abrio el modal 'Salir del proceso de solicitud' despues de Continuar post-OFAC. Se cancelo para evitar salir por error.");
             }
 
-            console.log(`[Cumplimiento][WARN] Continuar ejecutado pero la pantalla de verificacion sigue visible${mpn ? ` para ${mpn}` : ''}. Reintentando...`);
+            console.log('[Cumplimiento] Esperando pantalla post-producto real');
+            const pantallaPostProductoDetectada = await page.waitForFunction(
+                () => /Nivel de estudio|Reside actualmente en la Rep(?:u|ú)blica Dominicana|Posee otras identificaciones o nacionalidades|A(?:ñ|n)adir dirección|Direccion|Dirección|Referencia personal/i.test(document.body?.innerText || ''),
+                { timeout: FAST_UI ? 18000 : 30000 }
+            ).then(() => true).catch(() => false);
+            const pantallaPostProductoReal = pantallaPostProductoDetectada || await detectarPantallaPostProductoReal(page).catch(() => false);
+            console.log(`[Cumplimiento] Pantalla post-producto detectada=${pantallaPostProductoReal}`);
+
+            if (pantallaPostProductoReal) {
+                await asegurarPantallaPostProductoAntesDeTaller(page).catch(() => false);
+                console.log('[Cumplimiento] Post-OFAC dejó el portal en pantalla post-producto');
+                return 'post-producto' as const;
+            }
+
+            console.log(`[Cumplimiento][WARN] Continuar ejecutado pero no se detecto pantalla post-producto real${mpn ? ` para ${mpn}` : ''}. Reintentando...`);
         }
 
         const refreshVisible = await btnRefrescarCumplimiento.isVisible().catch(() => false);
@@ -444,8 +500,8 @@ async function procesarVerificacionesEspeciales(page: Page) {
     console.log(`[Cumplimiento] mpnVisible='${mpnVisible}'`);
 
     if (mpnVisible && cumplimientoMpnsProcesados.has(mpnVisible)) {
-        await confirmarCumplimientoAprobadoYContinuar(page, mpnVisible);
-        return { tipo: 'cumplimiento' as const, mpn: mpnVisible };
+        const estado = await confirmarCumplimientoAprobadoYContinuar(page, mpnVisible);
+        return { tipo: 'cumplimiento' as const, mpn: mpnVisible, estado };
     }
 
     const verificacionCumplimiento = await abrirSolicitudCumplimientoEnBizagiDesdePortal(page, {
@@ -456,9 +512,9 @@ async function procesarVerificacionesEspeciales(page: Page) {
     });
     if (verificacionCumplimiento?.mpn) {
         cumplimientoMpnsProcesados.add(verificacionCumplimiento.mpn.toUpperCase());
-        await confirmarCumplimientoAprobadoYContinuar(page, verificacionCumplimiento.mpn);
+        const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionCumplimiento.mpn);
         console.log(`[Cumplimiento] Solicitud abierta en Bizagi para: ${verificacionCumplimiento.mpn}`);
-        return { tipo: 'cumplimiento' as const, mpn: verificacionCumplimiento.mpn };
+        return { tipo: 'cumplimiento' as const, mpn: verificacionCumplimiento.mpn, estado };
     }
 
     return null;
@@ -474,6 +530,10 @@ async function intentarAvanceRealHaciaTaller(
     for (let intento = 1; intento <= maxClicks; intento++) {
         const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch(() => null);
         if (verificacionEspecialAntes?.tipo === 'cumplimiento') {
+            if (verificacionEspecialAntes.estado === 'post-producto') {
+                console.log(`[Continuar] Cumplimiento dejo pantalla post-producto (${contexto}).`);
+                return 'post-producto';
+            }
             console.log(`[Continuar] Cumplimiento ya gestionado antes del click (${contexto}). Paso a validacion de pantalla siguiente.`);
             return 'sin-cambio';
         }
@@ -497,6 +557,10 @@ async function intentarAvanceRealHaciaTaller(
 
         const verificacionEspecialDespuesClick = await procesarVerificacionesEspeciales(page).catch(() => null);
         if (verificacionEspecialDespuesClick?.tipo === 'cumplimiento') {
+            if (verificacionEspecialDespuesClick.estado === 'post-producto') {
+                console.log(`[Continuar] Cumplimiento dejo pantalla post-producto tras el click (${contexto}).`);
+                return 'post-producto';
+            }
             console.log(`[Continuar] Cumplimiento gestionado tras el click (${contexto}). Paso a validacion de pantalla siguiente.`);
             return 'sin-cambio';
         }
@@ -508,6 +572,10 @@ async function intentarAvanceRealHaciaTaller(
         if (urlDespuesClic === urlAntesClic) {
             const verificacionEspecialConUrlIgual = await procesarVerificacionesEspeciales(page).catch(() => null);
             if (verificacionEspecialConUrlIgual) {
+                if (verificacionEspecialConUrlIgual.tipo === 'cumplimiento' && verificacionEspecialConUrlIgual.estado === 'post-producto') {
+                    console.log(`[Continuar] Cumplimiento dejo pantalla post-producto con URL sin cambio (${contexto}).`);
+                    return 'post-producto';
+                }
                 console.log(`[Continuar] Verificacion especial detectada (${verificacionEspecialConUrlIgual.tipo}) con URL sin cambio (${contexto}).`);
                 return 'sin-cambio';
             }
@@ -3131,99 +3199,120 @@ async function completarDireccionPostProducto(page: Page) {
     }
 
     const modalDireccion = await abrirModalDireccionCasa(page);
+    console.log('[Direccion] Modal Casa abierto');
 
-    const direccionDropdownOptsRapido = {
-        required: false,
-        maxIntentos: FAST_UI ? 1 : 2,
-        timeoutMs: FAST_UI ? 700 : 1800,
-        panelTimeoutMs: FAST_UI ? 900 : 2000,
-    } as const;
+    const valorInvalido = (valor: string) => !valor || /^seleccione/i.test(valor) || /Reintentar/i.test(valor) || /^[-\s]+$/.test(valor.trim());
 
-    // Empezar por texto para no retrasar el inicio por validaciones de listas.
-    await llenarInputEnScope(modalDireccion, /Calle.*Avenida.*Autopista/i, randomTexto('Calle'), {
-        timeoutMs: ADDRESS_MODAL_INPUT_TIMEOUT,
-    });
-    await llenarInputEnScope(modalDireccion, /Nombre edificio/i, randomTexto('Edificio'), {
-        timeoutMs: ADDRESS_MODAL_OPTIONAL_INPUT_TIMEOUT,
-        required: false,
-    }).catch(() => { });
+    const leerValorRapido = async (label: RegExp) =>
+        ((await leerValorDropdownEnScope(modalDireccion, label, { timeoutMs: 700 }).catch(() => '')) || '').trim();
 
-    await llenarInputEnScope(modalDireccion, /N[uú]mero casa.*edificio/i, String(randomInt(1, 999)), {
-        timeoutMs: ADDRESS_MODAL_INPUT_TIMEOUT,
-    });
-    await llenarInputEnScope(modalDireccion, /N[uú]mero apartamento/i, String(randomInt(1, 80)), {
-        timeoutMs: ADDRESS_MODAL_INPUT_TIMEOUT,
-    });
-
-    const tipoActual = await leerValorDropdownEnScope(modalDireccion, /^Tipo$/i, { timeoutMs: ADDRESS_MODAL_VALUE_READ_TIMEOUT }).catch(() => '');
-    if (!/casa/i.test(tipoActual)) {
-        await asegurarDropdownIndex0SiVacioEnScope(page, modalDireccion, /^Tipo$/i, direccionDropdownOptsRapido).catch(() => { });
-        const tipoLuegoIndex = await leerValorDropdownEnScope(modalDireccion, /^Tipo$/i, { timeoutMs: ADDRESS_MODAL_VALUE_READ_TIMEOUT }).catch(() => '');
-        if (!/casa/i.test(tipoLuegoIndex)) {
-            await seleccionarDropdownEnScopePorTexto(page, modalDireccion, /^Tipo$/i, /^Casa$/i, 0).catch(() => { });
+    const llenarTextoRapido = async (label: RegExp, valor: string, required = true) => {
+        const labelLoc = modalDireccion.locator('label').filter({ hasText: label }).first();
+        const labelVisible = await labelLoc.waitFor({ state: 'visible', timeout: required ? 1800 : 900 }).then(() => true).catch(() => false);
+        if (!labelVisible) {
+            if (required) throw new Error(`[Direccion] No se encontro campo de texto '${label}'.`);
+            return false;
         }
+
+        const input = labelLoc.locator('xpath=following::input[1] | following::textarea[1]').first();
+        await input.waitFor({ state: 'visible', timeout: 1500 });
+        await input.fill(valor, { timeout: 1200 }).catch(async () => {
+            await input.evaluate((el, v) => {
+                const inputEl = el as HTMLInputElement | HTMLTextAreaElement;
+                inputEl.value = String(v);
+                inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }, valor);
+        });
+        await input.blur().catch(() => { });
+        return true;
+    };
+
+    const seleccionarComboRapido = async (label: RegExp, nombre: string, required = true) => {
+        const valorActual = await leerValorRapido(label);
+        if (!valorInvalido(valorActual)) {
+            console.log(`[Direccion] ${nombre} lista`);
+            return { ok: true, valor: valorActual };
+        }
+
+        const labelLoc = modalDireccion.locator('label').filter({ hasText: label }).first();
+        await labelLoc.waitFor({ state: 'visible', timeout: 1800 });
+        const dropdown = labelLoc
+            .locator('xpath=following::div[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or @role="combobox"][1]')
+            .first();
+        if (await dropdown.isVisible().catch(() => false)) {
+            await dropdown.click({ force: true, timeout: 1200 }).catch(() => { });
+        } else {
+            await labelLoc.click({ force: true }).catch(() => { });
+        }
+
+        const panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
+        const panelVisible = await panel.waitFor({ state: 'visible', timeout: 2200 }).then(() => true).catch(() => false);
+        if (!panelVisible) throw new Error(`[Direccion] No se abrio dropdown de ${nombre}.`);
+
+        const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+        const total = await opciones.count().catch(() => 0);
+        for (let i = 0; i < total; i++) {
+            const opcion = opciones.nth(i);
+            if (!(await opcion.isVisible().catch(() => false))) continue;
+            const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+            if (valorInvalido(texto)) continue;
+            await opcion.click({ force: true, timeout: 1200 }).catch(() => { });
+            await page.waitForTimeout(FAST_UI ? 120 : 250);
+            const valorFinal = await leerValorRapido(label);
+            const ok = !valorInvalido(valorFinal);
+            console.log(`[Direccion] ${nombre} seleccionado rapido=${ok} valor='${valorFinal}'`);
+            if (!ok && required) throw new Error(`[Direccion] ${nombre} quedo vacio tras seleccionar '${texto}'.`);
+            return { ok, valor: valorFinal };
+        }
+
+        throw new Error(`[Direccion] No hay opciones validas para ${nombre}. total=${total}`);
+    };
+
+    await llenarTextoRapido(/Calle.*Avenida.*Autopista/i, randomTexto('Calle'));
+    await llenarTextoRapido(/Nombre edificio/i, randomTexto('Edificio'), false).catch(() => false);
+    await llenarTextoRapido(/N[uú]mero casa.*edificio/i, String(randomInt(1, 999)));
+    await llenarTextoRapido(/N[uú]mero apartamento/i, String(randomInt(1, 80)));
+
+    const tipoActual = await leerValorRapido(/^Tipo$/i);
+    if (/casa/i.test(tipoActual)) {
+        console.log('[Direccion] Tipo ya es Casa, se omite selección');
+    } else {
+        console.log(`[Direccion] Tipo no editable o no confirmado (valor='${tipoActual}'), se omite selección`);
     }
-    await asegurarDropdownIndex0SiVacioEnScope(page, modalDireccion, /^Pa(?:i|\u00ed)s$/i, direccionDropdownOptsRapido).catch(() => { });
 
-    const direccionDropdownOptsDependientes = {
-        required: false,
-        maxIntentos: FAST_UI ? 4 : ADDRESS_MODAL_MAX_RETRIES + 2,
-        timeoutMs: FAST_UI ? 2200 : ADDRESS_MODAL_LABEL_TIMEOUT,
-        panelTimeoutMs: FAST_UI ? 2800 : ADDRESS_MODAL_PANEL_TIMEOUT + 1200,
-    } as const;
+    const paisActual = await leerValorRapido(/^Pa(?:i|í)s$/i);
+    if (!valorInvalido(paisActual)) console.log('[Direccion] País listo');
+    else await seleccionarComboRapido(/^Pa(?:i|í)s$/i, 'País', false).catch(() => console.log('[Direccion] País no editable, se continua'));
 
-    const direccionDropdownOptsRegionRapido = {
-        required: false,
-        maxIntentos: FAST_UI ? 1 : 2,
-        timeoutMs: FAST_UI ? 700 : 1200,
-        panelTimeoutMs: FAST_UI ? 900 : 1500,
-    } as const;
+    await seleccionarComboRapido(/^Regi(?:o|ó)n$/i, 'Región', false);
+    await seleccionarComboRapido(/^Provincia$/i, 'Provincia', false);
+    const municipio = await seleccionarComboRapido(/^Municipio$/i, 'Municipio');
+    const localidad = await seleccionarComboRapido(/^Localidad$/i, 'Localidad');
+    const sector = await seleccionarComboRapido(/^Sector$/i, 'Sector');
 
-    // Región y cascada: usar seleccionarDropdownDependienteConEspera que reintenta
-    // con tiempos adecuados para esperar carga del servidor (evita la pausa de 7s).
-    await clickReintentarListaSiVisible(page, /^Regi(?:o|\u00f3)n$/i, FAST_UI ? 220 : LIST_RETRY_CLICK_TIMEOUT).catch(() => false);
-    const inicioRegion = Date.now();
-    const regionRapida = await seleccionarDropdownIndexRapidoEnScope(page, modalDireccion, /^Regi(?:o|\u00f3)n$/i, 0, {
-        timeoutMs: FAST_UI ? 900 : 1400,
-        panelTimeoutMs: FAST_UI ? 1400 : 2200,
-        maxIntentos: FAST_UI ? 2 : 3,
-    }).catch(() => false);
-    if (!regionRapida) {
-        await seleccionarDropdownIndexEnScope(page, modalDireccion, /^Regi(?:o|\u00f3)n$/i, 0, direccionDropdownOptsRegionRapido).catch(() => { });
+    await llenarTextoRapido(/^Referencia$/i, randomTexto('Referencia'));
+    const referenciaValor = ((await modalDireccion.locator('label').filter({ hasText: /^Referencia$/i }).first().locator('xpath=following::input[1] | following::textarea[1]').first().inputValue().catch(() => '')) || '').trim();
+    console.log('[Direccion] Referencia llenada');
+
+    if (!municipio.ok || !localidad.ok || !sector.ok || !referenciaValor) {
+        throw new Error(`[Direccion] Validacion incompleta. municipio='${municipio.valor}' localidad='${localidad.valor}' sector='${sector.valor}' referencia='${referenciaValor}'`);
     }
-    console.log(`[Direccion] Region seleccionada rapido=${regionRapida} en ${Date.now() - inicioRegion}ms`);
-
-    const inicioProvincia = Date.now();
-    const provinciaRapida = await seleccionarDropdownIndexRapidoEnScope(page, modalDireccion, /^Provincia$/i, 0, {
-        timeoutMs: FAST_UI ? 900 : 1400,
-        panelTimeoutMs: FAST_UI ? 1400 : 2200,
-        maxIntentos: FAST_UI ? 2 : 3,
-    }).catch(() => false);
-    if (!provinciaRapida) {
-        await seleccionarDropdownIndexEnScope(page, modalDireccion, /^Provincia$/i, 0, direccionDropdownOptsRegionRapido).catch(() => { });
-    }
-    console.log(`[Direccion] Provincia seleccionada rapido=${provinciaRapida} en ${Date.now() - inicioProvincia}ms`);
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Municipio$/i, 0, direccionDropdownOptsDependientes).catch(() => { });
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Localidad$/i, 0, direccionDropdownOptsDependientes).catch(() => { });
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Sector$/i, 0, direccionDropdownOptsDependientes).catch(() => { });
-
-    await llenarInputEnScope(modalDireccion, /^Referencia$/i, randomTexto('Referencia'), {
-        timeoutMs: ADDRESS_MODAL_INPUT_TIMEOUT,
-    });
 
     const btnAceptar = modalDireccion.getByRole('button', { name: /^Aceptar$/i }).first();
     await btnAceptar.waitFor({ state: 'visible', timeout: 12000 });
 
-    // Reintentar clic en Aceptar hasta que el modal cierre (en caso de validaciones pendientes)
+    console.log('[Direccion] Click en Aceptar');
     let modalCerrado = false;
-    for (let intento = 1; intento <= 5 && !modalCerrado; intento++) {
+    for (let intento = 1; intento <= 3 && !modalCerrado; intento++) {
         await btnAceptar.click({ force: true }).catch(() => { });
-        modalCerrado = await modalDireccion.waitFor({ state: 'hidden', timeout: 5000 }).then(() => true).catch(() => false);
-        if (!modalCerrado && intento < 5) await page.waitForTimeout(400);
+        modalCerrado = await modalDireccion.waitFor({ state: 'hidden', timeout: 3000 }).then(() => true).catch(() => false);
+        if (!modalCerrado && intento < 3) await page.waitForTimeout(300);
     }
     if (!modalCerrado) {
-        throw new Error('[Direccion] El modal de direccion no cerro tras 5 intentos de Aceptar.');
+        throw new Error('[Direccion] El modal de direccion no cerro tras 3 intentos de Aceptar.');
     }
+    console.log('[Direccion] Modal Dirección cerrado');
     return true;
 }
 
@@ -5339,7 +5428,23 @@ async function esperarPantallaTallerProductos(
 
 async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel) {
     await agregarRelacionadoSiAplica(page, registro);
-    await procesarVerificacionesEspeciales(page).catch(() => null);
+    let postProductoLlenadoDesdeCumplimiento = false;
+    const llenarPostProductoPostOfac = async () => {
+        if (postProductoLlenadoDesdeCumplimiento) return;
+        console.log('[Relacionados] Pantalla post-producto recibida desde cumplimiento, no se hará Continuar adicional');
+        console.log('[PostProducto] Iniciando llenado inmediatamente después de OFAC');
+        const completo = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true });
+        if (!completo) {
+            throw new Error('[CRITICO] No se pudo completar la pantalla post-producto después de OFAC.');
+        }
+        postProductoLlenadoDesdeCumplimiento = true;
+        console.log('[PostProducto] Llenado post-OFAC completado');
+    };
+
+    const verificacionInicial = await procesarVerificacionesEspeciales(page).catch(() => null);
+    if (verificacionInicial?.tipo === 'cumplimiento' && verificacionInicial.estado === 'post-producto') {
+        await llenarPostProductoPostOfac();
+    }
 
     const msgSinProductosDespuesContinuar = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const labelPropositoTaller = page.locator('label').filter({ hasText: /Prop(?:o|\u00f3)sito/i }).first();
@@ -5359,7 +5464,7 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         return productoEnUI;
     };
 
-    const productoOk = await verificarProductoAntesDeContinuar();
+    const productoOk = postProductoLlenadoDesdeCumplimiento || await verificarProductoAntesDeContinuar();
     if (!productoOk) {
         console.log(`[Relacionados][BLOQUEO] No se detecta el producto '${registro.tipoCuenta}' agregado. Abortando click en Continuar.`);
         throw new Error(`[CRITICO] Bloqueado 'Continuar': No se ha seleccionado o agregado el producto '${registro.tipoCuenta}'. El flujo no puede avanzar.`);
@@ -5377,7 +5482,11 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
     }
 
     for (let intentoAvance = 1; intentoAvance <= 3; intentoAvance++) {
-        await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionAntesAvance = await procesarVerificacionesEspeciales(page).catch(() => null);
+        if (verificacionAntesAvance?.tipo === 'cumplimiento' && verificacionAntesAvance.estado === 'post-producto') {
+            await llenarPostProductoPostOfac();
+            continue;
+        }
         console.log(`[Relacionados] intento ${intentoAvance}/3 url=${page.url()}`);
         const resultadoInicial = await intentarAvanceRealHaciaTaller(
             page,
@@ -5390,6 +5499,9 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
                 const msg = e instanceof Error ? e.message : String(e);
                 if (/\[CRITICO\]/i.test(msg)) throw e;
             });
+        } else if (resultadoInicial === 'post-producto') {
+            await llenarPostProductoPostOfac();
+            continue;
         } else if (resultadoInicial === 'taller') {
             return labelPropositoTaller;
         }
@@ -5402,7 +5514,11 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         }
 
         console.log(`[Relacionados] completarInformacionClientePostProducto...`);
-        await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionAntesCompletarPostProducto = await procesarVerificacionesEspeciales(page).catch(() => null);
+        if (verificacionAntesCompletarPostProducto?.tipo === 'cumplimiento' && verificacionAntesCompletarPostProducto.estado === 'post-producto') {
+            await llenarPostProductoPostOfac();
+            continue;
+        }
         const completoPostProducto = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
         if (completoPostProducto) {
             await page.waitForTimeout(FAST_UI ? 300 : 800);

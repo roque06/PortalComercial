@@ -1797,42 +1797,113 @@ async function seleccionarRadioAccionOfacPorLabel(
 }
 
 async function manejarCoincidenciasOfacDirectoBizagi(bizagiPage: Page) {
-  // --- INTENTO PRIORITARIO (Basado en grabación exitosa) ---
-  const btnDescartarGrabado = bizagiPage.getByText('Descartar').first();
-  if (await btnDescartarGrabado.isVisible().catch(() => false)) {
-      console.log('[Cumplimiento][Bizagi] Pulsando "Descartar" (grabado)...');
-      await btnDescartarGrabado.click({ force: true }).catch(() => {});
-      await bizagiPage.waitForTimeout(800); // Espera a que se habilite el combo de motivo
-  }
-  
-  const radioDescartar = bizagiPage.locator('input[type="radio"][id*="sidP_AccOFAC"][value="2"]').first();
-  const comboMotivo = bizagiPage
-    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox"] | //*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[contains(@class,"ui-select-data")])[1]')
-    .first();
+  // Verificar si hay campos OFAC visibles en la pagina
+  const labelDescartarVisible = await bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first().isVisible().catch(() => false);
+  const radioDescartarVisible = await bizagiPage.locator('input[type="radio"][id*="AccOFAC-2"], input[type="radio"][value="2"]').first().isVisible().catch(() => false);
+  const labelMotivoVisible = await bizagiPage.getByText(/Motivo Coincidencias OFAC/i).first().isVisible().catch(() => false);
 
-  let visibleRadioDescartar = !!(await radioDescartar.count().catch(() => 0)) || await bizagiPage.locator('label').filter({ hasText: /Descartar/i }).first().isVisible().catch(() => false);
-  const visibleComboMotivo = await comboMotivo.isVisible().catch(() => false) || await bizagiPage.getByText(/Motivo Coincidencias OFAC/i).first().isVisible().catch(() => false);
-  if (visibleComboMotivo && !visibleRadioDescartar) {
-    const fin = Date.now() + 4000;
-    while (Date.now() < fin && !visibleRadioDescartar) {
-      await bizagiPage.waitForTimeout(200);
-      visibleRadioDescartar = !!(await radioDescartar.count().catch(() => 0)) || await bizagiPage.locator('label').filter({ hasText: /Descartar/i }).first().isVisible().catch(() => false);
+  if (!labelDescartarVisible && !radioDescartarVisible && !labelMotivoVisible) {
+    console.log('[Cumplimiento][Bizagi][OFAC-Direct] No se detectaron campos OFAC en la pagina. Saltando.');
+    return false;
+  }
+
+  console.log(`[Cumplimiento][Bizagi][OFAC-Direct] Campos OFAC detectados. descartar=${labelDescartarVisible||radioDescartarVisible} motivo=${labelMotivoVisible}`);
+
+  // PASO 1: Seleccionar "Descartar" en Accion Coincidencias OFAC
+  const radioDescartar = bizagiPage.locator('input[type="radio"][id*="AccOFAC-2"]').first();
+  const radioDescartarValue = bizagiPage.locator('input[type="radio"][value="2"]').first();
+  const labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+
+  let descartarMarcado = false;
+  for (let intento = 1; intento <= 3 && !descartarMarcado; intento++) {
+    if (await labelDescartar.isVisible().catch(() => false)) {
+      await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
+      await labelDescartar.click({ force: true }).catch(() => {});
+      await bizagiPage.waitForTimeout(300);
     }
-  }
-  console.log(`[Cumplimiento][Bizagi] OFAC visible radio=${visibleRadioDescartar} motivo=${visibleComboMotivo}`);
-  if (!visibleRadioDescartar && !visibleComboMotivo) return false;
 
-  const accionOfac = obtenerConfiguracionAccionOfac();
-  await seleccionarRadioAccionOfacPorLabel(
-    bizagiPage,
-    bizagiPage,
-    accionOfac.nombre,
-    accionOfac.valor,
-    accionOfac.regex,
-  );
-  await seleccionarMotivoCoincidenciasOfacCumplimiento(bizagiPage, bizagiPage.locator('body').first());
-  return true;
+    if (await radioDescartar.isVisible().catch(() => false)) {
+      await radioDescartar.check({ force: true }).catch(() => {});
+    } else if (await radioDescartarValue.isVisible().catch(() => false)) {
+      await radioDescartarValue.check({ force: true }).catch(() => {});
+    }
+
+    descartarMarcado = await radioDescartar.isChecked().catch(async () =>
+      radioDescartarValue.isChecked().catch(() => false)
+    );
+    if (!descartarMarcado) await bizagiPage.waitForTimeout(200);
+  }
+  console.log(`[Cumplimiento][Bizagi][OFAC-Direct] Descartar marcado=${descartarMarcado}`);
+
+  // PASO 2: Seleccionar Motivo Coincidencias OFAC (index 0 = primer opcion)
+  await bizagiPage.waitForTimeout(500);
+
+  const comboMotivo = bizagiPage.getByRole('combobox', { name: /Motivo Coincidencias OFAC/i }).first();
+  const comboMotivoAlt = bizagiPage.locator('input[role="combobox"][id*="combo"]').first();
+  const comboMotivoXpath = bizagiPage.locator(
+    'xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox"])[1]'
+  ).first();
+
+  let comboUsado = comboMotivo;
+  if (!(await comboUsado.isVisible().catch(() => false))) comboUsado = comboMotivoXpath;
+  if (!(await comboUsado.isVisible().catch(() => false))) comboUsado = comboMotivoAlt;
+
+  const comboVisible = await comboUsado.isVisible().catch(() => false);
+  console.log(`[Cumplimiento][Bizagi][OFAC-Direct] Combo Motivo visible=${comboVisible}`);
+
+  if (comboVisible) {
+    // Triple-click para abrir segun grabacion
+    await comboUsado.click({ force: true }).catch(() => {});
+    await bizagiPage.waitForTimeout(150);
+    await comboUsado.click({ force: true }).catch(() => {});
+    await bizagiPage.waitForTimeout(150);
+    await comboUsado.click({ force: true }).catch(() => {});
+    await bizagiPage.waitForTimeout(500);
+
+    const opcionIndex0 = bizagiPage.getByRole('option').first();
+    const opcionVisible0 = await opcionIndex0.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false);
+
+    if (opcionVisible0) {
+      const textoOpcion = await opcionIndex0.textContent().catch(() => '');
+      console.log(`[Cumplimiento][Bizagi][OFAC-Direct] Seleccionando opcion[0]: "${textoOpcion?.trim()}"`);
+      await opcionIndex0.click({ force: true }).catch(() => {});
+    }
+    await bizagiPage.waitForTimeout(400);
+  }
+
+  // PASO 3: Solicitar Aclaraciones = No
+  const labelNo = bizagiPage.locator('label').filter({ hasText: /^No$/i }).first();
+  const radioNo = bizagiPage.locator('input[type="radio"][value="false"]').first();
+
+  if (await labelNo.isVisible().catch(() => false)) {
+    await labelNo.scrollIntoViewIfNeeded().catch(() => {});
+    await labelNo.click({ force: true }).catch(() => {});
+    console.log('[Cumplimiento][Bizagi][OFAC-Direct] Solicitar Aclaraciones = No (label)');
+  } else if (await radioNo.isVisible().catch(() => false)) {
+    await radioNo.check({ force: true }).catch(() => {});
+    console.log('[Cumplimiento][Bizagi][OFAC-Direct] Solicitar Aclaraciones = No (radio)');
+  }
+  await bizagiPage.waitForTimeout(300);
+
+  // PASO 4: Click en Siguiente
+  const btnSiguiente = bizagiPage.getByRole('button', { name: /^Siguiente$/i }).first();
+  if (await btnSiguiente.isVisible().catch(() => false)) {
+    await btnSiguiente.click({ force: true }).catch(() => {});
+    await bizagiPage.waitForTimeout(800);
+
+    // PASO 5: Confirmar Aceptar
+    const btnAceptar = bizagiPage.getByRole('button', { name: /^Aceptar$/i }).first();
+    if (await btnAceptar.isVisible().catch(() => false)) {
+      console.log('[Cumplimiento][Bizagi][OFAC-Direct] Confirmacion Aceptar detectada.');
+      await btnAceptar.click({ force: true }).catch(() => {});
+      await bizagiPage.waitForTimeout(500);
+    }
+    return true;
+  }
+
+  return descartarMarcado || comboVisible;
 }
+
 
 async function manejarCoincidenciasOfacConfirmarXpathBizagi(bizagiPage: Page) {
   const accionOfac = obtenerConfiguracionAccionOfac();
@@ -2550,6 +2621,23 @@ async function abrirSolicitudCumplimientoBizagiRapido(bizagiPage: Page, mpn: str
       : celdaNumeroCaso;
   await objetivoPrioritario.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   console.log(`[Cumplimiento][Bizagi] intento prioritario sobre numero de caso para ${mpn}`);
+
+  const diagnosticarPostClickMpn = async () => {
+    const gestionVisible = await bizagiPage.getByText(/Gesti[oó]n de Coincidencias/i).first().isVisible().catch(() => false);
+    const ofacVisible = await bizagiPage.getByText(/Coincidencias OFAC/i).first().isVisible().catch(() => false);
+    const accionVisible = await bizagiPage.getByText(/Acci[oó]n Coincidencias OFAC/i).first().isVisible().catch(() => false);
+    const bodyText = ((await bizagiPage.locator('body').innerText({ timeout: 1500 }).catch(() => '')) || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 900);
+
+    console.log(`[Cumplimiento][Bizagi] URL después de click MPN: ${bizagiPage.url()}`);
+    console.log(`[Cumplimiento][Bizagi] Diagnóstico post-click MPN: gestionVisible=${gestionVisible} ofacVisible=${ofacVisible} accionVisible=${accionVisible}`);
+    console.log(`[Cumplimiento][Bizagi] Textos visibles post-click MPN: ${bodyText}`);
+
+    return gestionVisible || ofacVisible || accionVisible || await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage).catch(() => false);
+  };
+
   for (const accionPrioritaria of [
     async () => { await objetivoPrioritario.click(); },
     async () => { await objetivoPrioritario.dblclick(); },
@@ -2578,11 +2666,21 @@ async function abrirSolicitudCumplimientoBizagiRapido(bizagiPage: Page, mpn: str
   ]) {
     await accionPrioritaria().catch(() => {});
     const inicioPrioritario = Date.now();
-    while (Date.now() - inicioPrioritario < 1200) {
-      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) return;
+    let diagnosticoImpreso = false;
+    while (Date.now() - inicioPrioritario < 3500) {
+      const pantallaAbierta = await diagnosticarPostClickMpn();
+      diagnosticoImpreso = true;
+      if (pantallaAbierta) {
+        console.log('[Cumplimiento][Bizagi] Pantalla Gestionar Coincidencias detectada después de click prioritario');
+        console.log('[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasCumplimientoBizagi');
+        return;
+      }
       await bizagiPage.waitForTimeout(150);
     }
+    if (!diagnosticoImpreso) await diagnosticarPostClickMpn().catch(() => false);
   }
+
+  console.log('[Cumplimiento][Bizagi] Pantalla no abrió con click prioritario, ejecutando fallback de apertura');
 
   for (const candidatoDirecto of [spanNumeroCasoXPath, spanNumeroCaso, textoNumeroCaso, celdaNumeroCaso, linkNumeroCaso]) {
     const visibleDirecto = await candidatoDirecto.isVisible().catch(() => false);
@@ -2594,14 +2692,22 @@ async function abrirSolicitudCumplimientoBizagiRapido(bizagiPage: Page, mpn: str
     await candidatoDirecto.click({ force: true }).catch(() => {});
     let inicioDirecto = Date.now();
     while (Date.now() - inicioDirecto < 1500) {
-      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) return;
+      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) {
+        console.log('[Cumplimiento][Bizagi] Pantalla Gestionar Coincidencias detectada después de fallback');
+        console.log('[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasCumplimientoBizagi');
+        return;
+      }
       await bizagiPage.waitForTimeout(200);
     }
 
     await candidatoDirecto.dblclick({ force: true }).catch(() => {});
     inicioDirecto = Date.now();
     while (Date.now() - inicioDirecto < 1500) {
-      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) return;
+      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) {
+        console.log('[Cumplimiento][Bizagi] Pantalla Gestionar Coincidencias detectada después de fallback');
+        console.log('[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasCumplimientoBizagi');
+        return;
+      }
       await bizagiPage.waitForTimeout(200);
     }
 
@@ -2613,7 +2719,11 @@ async function abrirSolicitudCumplimientoBizagiRapido(bizagiPage: Page, mpn: str
     }).catch(() => {});
     inicioDirecto = Date.now();
     while (Date.now() - inicioDirecto < 1200) {
-      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) return;
+      if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) {
+        console.log('[Cumplimiento][Bizagi] Pantalla Gestionar Coincidencias detectada después de fallback');
+        console.log('[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasCumplimientoBizagi');
+        return;
+      }
       await bizagiPage.waitForTimeout(200);
     }
   }
@@ -2654,12 +2764,17 @@ async function abrirSolicitudCumplimientoBizagiRapido(bizagiPage: Page, mpn: str
       await accion().catch(() => {});
       const inicio = Date.now();
       while (Date.now() - inicio < (grupo === 'numero-caso' ? 2200 : 1400)) {
-        if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) return;
+        if (await pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage)) {
+          console.log('[Cumplimiento][Bizagi] Pantalla Gestionar Coincidencias detectada después de fallback');
+          console.log('[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasCumplimientoBizagi');
+          return;
+        }
         await bizagiPage.waitForTimeout(250);
       }
     }
   }
 
+  console.log(`[Cumplimiento][Bizagi] No se pudo abrir pantalla Gestionar Coincidencias para ${mpn}`);
   throw new Error(`[CRITICO] No se pudo abrir la solicitud de Cumplimiento para '${mpn}' desde la fila encontrada.`);
 }
 
