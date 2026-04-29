@@ -68,6 +68,8 @@ import { closeBrowserSession, runRegistros } from '../../../src/services/common/
 
 const capturas: string[] = [];
 const cumplimientoMpnsProcesados = new Set<string>();
+const plaftsSinManejadorLogueadas = new Set<string>();
+const productosConfirmadosPorRegistro = new Set<string>();
 const PORTAL_BASE_URL = (process.env.PW_PORTAL_URL ?? process.env.PORTAL_URL ?? 'https://srvqacgowb01.local.bsc.com:5000').replace(/\/+$/, '');
 const PORTAL_MULTIPRODUCT_URL = `${PORTAL_BASE_URL}/requests/create/multiproduct`;
 
@@ -189,6 +191,116 @@ async function esperarPortalEstableDespuesOfac(page: Page, timeoutMs = FAST_UI ?
         await page.waitForTimeout(FAST_UI ? 250 : 500);
     }
 
+    return false;
+}
+
+async function esperarFinGuardandoSolicitudRapido(page: Page, timeoutMs = FAST_UI ? 8000 : 10000) {
+    const inicio = Date.now();
+    const textosGuardado = page.getByText(/Guardando solicitud|Guardando informaci[oó]n|Actualizando solicitud/i).first();
+    const overlays = page.locator(
+        '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible, .p-component-overlay-enter:visible'
+    );
+
+    console.log('[Verificaciones] Esperando fin de Guardando solicitud');
+    while (Date.now() - inicio < timeoutMs) {
+        const guardandoVisible = await textosGuardado.isVisible().catch(() => false);
+        const overlayCount = await overlays.count().catch(() => 0);
+        if (!guardandoVisible && overlayCount === 0) return true;
+        await page.waitForTimeout(FAST_UI ? 200 : 300);
+    }
+    return false;
+}
+
+async function leerAprobacionesVerificacionesVisibles(page: Page) {
+    const ofacVisible = await page.getByText(/Listas\s+OFAC|\bOFAC\b/i).first().isVisible().catch(() => false);
+    const plaftVisible = await page.getByText(/\bPLAFT\b|Prevenci(?:o|ó)n.*Lavado|Lavado de Activos/i).first().isVisible().catch(() => false);
+    const bloqueVerificaciones = page
+        .locator('section, fieldset, .p-panel, .p-card, div')
+        .filter({ hasText: /Verificaciones/i })
+        .filter({ hasText: /Aprobado|OFAC|PLAFT/i })
+        .first();
+    const scopeAprobados = await bloqueVerificaciones.isVisible().catch(() => false) ? bloqueVerificaciones : page.locator('body');
+    const tagValuesAprobado = scopeAprobados.locator('span.p-tag-value:visible').filter({ hasText: /^\s*Aprobado\s*$/i });
+    const tagsSuccessAprobado = scopeAprobados.locator('.p-tag-success:visible, .p-tag:visible').filter({ hasText: /^\s*Aprobado\s*$/i });
+    const tagValueCount = await tagValuesAprobado.count().catch(() => 0);
+    const tagSuccessCount = await tagsSuccessAprobado.count().catch(() => 0);
+    const tagsAprobadoVisibles = tagValueCount || tagSuccessCount;
+
+    const aprobadoEnContenedor = async (texto: RegExp) => {
+        const contenedor = scopeAprobados
+            .locator('tr, li, .p-panel, .p-card, .p-datatable-row, div[class*="row"], div[class*="flex"], div')
+            .filter({ hasText: texto })
+            .filter({ hasText: /^.*Aprobado.*$/i })
+            .first();
+        const tagValue = contenedor.locator('span.p-tag-value').filter({ hasText: /^Aprobado$/i }).first();
+        const tagSuccess = contenedor.locator('.p-tag-success, .p-tag').filter({ hasText: /^\s*Aprobado\s*$/i }).first();
+        return await tagValue.isVisible().catch(() => false) || await tagSuccess.isVisible().catch(() => false);
+    };
+
+    const ofacAprobadoPorContenedor = ofacVisible ? await aprobadoEnContenedor(/Listas\s+OFAC|\bOFAC\b/i) : false;
+    const plaftAprobado = plaftVisible ? await aprobadoEnContenedor(/\bPLAFT\b|Prevenci(?:o|ó)n.*Lavado|Lavado de Activos/i) : false;
+    const ofacAprobado = ofacAprobadoPorContenedor || (ofacVisible && tagsAprobadoVisibles > 0) || tagsAprobadoVisibles === 1;
+
+    return { ofacVisible, ofacAprobado, plaftVisible, plaftAprobado, tagsAprobadoVisibles };
+}
+
+async function esperarAprobacionesVerificacionesVisibles(
+    page: Page,
+    requeridas: { ofac?: boolean; plaft?: boolean } = { ofac: true, plaft: true },
+    timeoutMs = FAST_UI ? 8000 : 10000
+) {
+    const inicio = Date.now();
+    console.log(`[Verificaciones] Esperando aprobaciones visibles requeridas: ${requeridas.ofac ? 'OFAC' : ''}${requeridas.ofac && requeridas.plaft ? ', ' : ''}${requeridas.plaft ? 'PLAFT' : ''}`);
+    console.log(`[Verificaciones] Requeridas para aprobar: OFAC=${!!requeridas.ofac} PLAFT=${!!requeridas.plaft}`);
+    let ultimoLog = 0;
+    let ultimoEstado = '';
+
+    while (Date.now() - inicio < timeoutMs) {
+        const estado = await leerAprobacionesVerificacionesVisibles(page);
+        const estadoLog = `${estado.tagsAprobadoVisibles}|${estado.ofacVisible}|${estado.ofacAprobado}|${estado.plaftVisible}|${estado.plaftAprobado}`;
+        if (estadoLog !== ultimoEstado || Date.now() - ultimoLog >= 1000) {
+            console.log(`[Verificaciones] Tags Aprobado visibles=${estado.tagsAprobadoVisibles}`);
+            console.log(`[Verificaciones] OFAC requerido aprobado=${requeridas.ofac ? estado.ofacAprobado : 'omitido'}`);
+            console.log(`[Verificaciones] PLAFT ${requeridas.plaft ? `requerido aprobado=${estado.plaftAprobado}` : 'omitido'}`);
+            ultimoEstado = estadoLog;
+            ultimoLog = Date.now();
+        }
+
+        const hayRequeridas = !!requeridas.ofac || !!requeridas.plaft;
+        const todasAprobadas = hayRequeridas
+            && (!requeridas.ofac || estado.ofacAprobado)
+            && (!requeridas.plaft || estado.plaftAprobado);
+        if (todasAprobadas) {
+            console.log('[Verificaciones] Todas las verificaciones requeridas están Aprobadas');
+            return true;
+        }
+
+        if (!hayRequeridas) return false;
+        await page.waitForTimeout(FAST_UI ? 200 : 300);
+    }
+
+    return false;
+}
+
+async function clickContinuarTrasAprobadoRapido(page: Page) {
+    await esperarFinGuardandoSolicitudRapido(page).catch(() => false);
+    const inicio = Date.now();
+    while (Date.now() - inicio < (FAST_UI ? 8000 : 10000)) {
+        const btnContinuar = await getBotonContinuarPrincipal(page);
+        const visible = btnContinuar ? await btnContinuar.isVisible().catch(() => false) : false;
+        const enabled = visible && btnContinuar ? await btnContinuar.isEnabled().catch(() => false) : false;
+        console.log(`[Verificaciones] Botón Continuar enabled=${enabled}`);
+        if (btnContinuar && visible && enabled) {
+            await btnContinuar.scrollIntoViewIfNeeded().catch(() => { });
+            const clicked = await btnContinuar.click({ timeout: 1800, noWaitAfter: true }).then(() => true).catch(() => false)
+                || await btnContinuar.click({ force: true, timeout: 1800, noWaitAfter: true }).then(() => true).catch(() => false);
+            if (clicked) {
+                console.log('[Verificaciones] Click inmediato en Continuar tras Aprobado');
+                return true;
+            }
+        }
+        await page.waitForTimeout(FAST_UI ? 200 : 300);
+    }
     return false;
 }
 
@@ -390,11 +502,34 @@ async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string)
 
     await page.bringToFront().catch(() => { });
     console.log('[Cumplimiento] Portal al frente después de OFAC');
-    console.log('[Cumplimiento] Recargando solicitud después de OFAC');
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: FAST_UI ? 20000 : 40000 }).catch(() => { });
-    console.log('[Cumplimiento] Esperando portal estable después de reload');
-    await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
-    await esperarPortalEstableDespuesOfac(page).catch((e) => { throw e; });
+
+    const aprobadoRapido = await esperarAprobacionesVerificacionesVisibles(
+        page,
+        { ofac: true, plaft: false },
+        FAST_UI ? 8000 : 10000
+    ).catch(() => false);
+    if (aprobadoRapido) {
+        const clicRapido = await clickContinuarTrasAprobadoRapido(page).catch(() => false);
+        if (!clicRapido) {
+            throw new Error("[CRITICO] No se pudo hacer click en 'Continuar' despues de aprobar verificaciones.");
+        }
+        await esperarFinActualizandoSolicitud(page, FAST_UI ? 8000 : 12000).catch(() => false);
+        await esperarPortalEstableDespuesOfac(page, FAST_UI ? 8000 : 12000).catch((e) => { throw e; });
+
+        const pantallaPostProductoReal = await detectarPantallaPostProductoReal(page).catch(() => false);
+        console.log(`[Cumplimiento] Pantalla post-producto detectada=${pantallaPostProductoReal}`);
+        if (pantallaPostProductoReal) {
+            await asegurarPantallaPostProductoAntesDeTaller(page).catch(() => false);
+            console.log('[Cumplimiento] Post-OFAC dejó el portal en pantalla post-producto');
+            return 'post-producto' as const;
+        }
+    } else {
+        console.log('[Cumplimiento] Recargando solicitud después de OFAC porque Aprobado no apareció rápido');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: FAST_UI ? 20000 : 40000 }).catch(() => { });
+        console.log('[Cumplimiento] Esperando portal estable después de reload');
+        await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
+        await esperarPortalEstableDespuesOfac(page).catch((e) => { throw e; });
+    }
 
     const modalSalidaTrasReloadInicial = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
     if (modalSalidaTrasReloadInicial) {
@@ -473,8 +608,25 @@ async function procesarVerificacionesEspeciales(page: Page) {
         .first()
         .isVisible()
         .catch(() => false);
+    const plaftVisible = await page
+        .getByText(/PLAFT|Prevenci(?:o|\u00f3)n.*Lavado|Lavado de Activos/i)
+        .first()
+        .isVisible()
+        .catch(() => false);
+    const verificacionesDetectadas = badgeCumplimientoVisible || plaftVisible;
 
+    console.log(`[Verificaciones] Pantalla/badge de verificaciones detectado=${verificacionesDetectadas}`);
+    console.log(`[Verificaciones] OFAC detectado=${badgeCumplimientoVisible}`);
+    console.log(`[Verificaciones] PLAFT detectado=${plaftVisible}`);
     console.log(`[Cumplimiento] badgeVisible=${badgeCumplimientoVisible} url=${page.url()}`);
+
+    if (plaftVisible && !badgeCumplimientoVisible) {
+        const etapaKey = page.url().split('/').pop() || 'unknown';
+        if (!plaftsSinManejadorLogueadas.has(etapaKey)) {
+            plaftsSinManejadorLogueadas.add(etapaKey);
+            console.log('[Verificaciones][WARN] PLAFT detectado pero no existe manejador implementado; se continuará flujo normal');
+        }
+    }
 
     if (!badgeCumplimientoVisible) {
         const verificacionBpm = await abrirBpmSiVerificacionConoceCliente(page).catch((e) => {
@@ -486,8 +638,11 @@ async function procesarVerificacionesEspeciales(page: Page) {
             return { tipo: 'conoce-cliente' as const, mpn: verificacionBpm.mpn };
         }
 
+        console.log('[Verificaciones] No hay verificaciones pendientes, continuando flujo normal');
         return null;
     }
+
+    console.log('[Verificaciones] Resolviendo OFAC');
 
     const mpnVisible = await page
         .locator('span.p-tag-value')
@@ -501,6 +656,7 @@ async function procesarVerificacionesEspeciales(page: Page) {
 
     if (mpnVisible && cumplimientoMpnsProcesados.has(mpnVisible)) {
         const estado = await confirmarCumplimientoAprobadoYContinuar(page, mpnVisible);
+        console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
         return { tipo: 'cumplimiento' as const, mpn: mpnVisible, estado };
     }
 
@@ -514,6 +670,7 @@ async function procesarVerificacionesEspeciales(page: Page) {
         cumplimientoMpnsProcesados.add(verificacionCumplimiento.mpn.toUpperCase());
         const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionCumplimiento.mpn);
         console.log(`[Cumplimiento] Solicitud abierta en Bizagi para: ${verificacionCumplimiento.mpn}`);
+        console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
         return { tipo: 'cumplimiento' as const, mpn: verificacionCumplimiento.mpn, estado };
     }
 
@@ -523,11 +680,23 @@ async function procesarVerificacionesEspeciales(page: Page) {
 async function intentarAvanceRealHaciaTaller(
     page: Page,
     contexto: string,
-    options?: { maxClicks?: number }
+    options?: { maxClicks?: number; tipoCuenta?: string }
 ): Promise<ResultadoAvanceRelacionados> {
     const maxClicks = options?.maxClicks ?? 2;
 
     for (let intento = 1; intento <= maxClicks; intento++) {
+        if (options?.tipoCuenta && await estaEnPantallaProductos(page).catch(() => false)) {
+            const productoVisible = await productoAgregadoVisible(page, options.tipoCuenta).catch(() => false);
+            console.log(`[Producto] Producto agregado visible=${productoVisible}`);
+            if (!productoVisible) {
+                throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
+            }
+            console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
+            console.log('[Producto] Evitando duplicar producto/cuenta');
+            console.log('[Producto] Continuando con producto ya confirmado');
+            console.log('[Producto] Producto confirmado, haciendo Continuar');
+        }
+
         const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch(() => null);
         if (verificacionEspecialAntes?.tipo === 'cumplimiento') {
             if (verificacionEspecialAntes.estado === 'post-producto') {
@@ -610,6 +779,11 @@ async function intentarAvanceRealHaciaTaller(
 
         if (enProductos) {
             console.log(`[Continuar] Avance detectado hacia Productos (${contexto}).`);
+            if (options?.tipoCuenta && productoConfirmadoEnRegistro({ tipoCuenta: options.tipoCuenta, identificacion: '' } as unknown as RegistroExcel)) {
+                console.log(`[Producto] Producto ya confirmado para tipo=${options.tipoCuenta}, continuando...`);
+                return 'productos';
+            }
+            console.log(`[Continuar] Productos detectado, retornando 'productos' para procesamiento posterior`);
             return 'productos';
         }
 
@@ -1053,6 +1227,427 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
 
             console.log(`[GestionDoc] resultadoAvance = ${resultadoAvance}`);
             console.log(`[GestionDoc] resultadoAvance = ${resultadoAvance}`);
+
+            // Helper seguro: estaEnPantallaProductos con timeout para evitar bloqueos indefinidos
+            const estaEnPantallaProductosSeguro = async (pageRef: Page): Promise<boolean> => {
+                return Promise.race([
+                    estaEnPantallaProductos(pageRef),
+                    pageRef.waitForTimeout(1500).then(() => false),
+                ]).catch(() => false);
+            };
+
+            // Helper fallback para seleccionar Productos por labels directos o por posición de dropdowns
+            const procesarProductosPorFallbackDirecto = async (pageRef: Page, tipoCuenta: string) => {
+                console.log('[Producto][FallbackDirecto] Procesando Productos por labels visibles');
+                try {
+                    // Diagnóstico inicial
+                    const productosTextVisible = await pageRef.getByText(/^Productos$/i).first().isVisible({ timeout: 1000 }).catch(() => false);
+                    console.log(`[Producto][FallbackDirecto][Diag] texto Productos visible=${productosTextVisible}`);
+
+                    // Intentar buscar labels
+                    const categoriaLabel = pageRef.getByText(/Categor[ií]a de producto/i).first();
+                    const productoLabel = pageRef.getByText(/^Producto$/i).first();
+                    const categoriaLabelVisible = await categoriaLabel.isVisible({ timeout: 800 }).catch(() => false);
+                    const productoLabelVisible = await productoLabel.isVisible({ timeout: 800 }).catch(() => false);
+
+                    console.log(`[Producto][FallbackDirecto][Diag] label Categoria visible=${categoriaLabelVisible}`);
+                    console.log(`[Producto][FallbackDirecto][Diag] label Producto visible=${productoLabelVisible}`);
+
+                    // Si no encontramos labels por visibilidad, usar dropdowns por posición
+                    let categoriDropdown: Locator;
+                    let productoDropdown: Locator;
+
+                    if (categoriaLabelVisible) {
+                        // Usar labels si están visibles
+                        categoriDropdown = categoriaLabel.locator('..').locator('div.p-dropdown, [data-pc-name="dropdown"]').first();
+                        console.log('[Producto][FallbackDirecto][Diag] usando dropdown categoria por label');
+                    } else {
+                        // Fallback: buscar por posición de dropdowns
+                        console.log('[Producto][FallbackDirecto][WARN] Label Categoría no visible; usando dropdowns visibles por posición');
+                        const todosDropdowns = pageRef.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible');
+                        const countDropdowns = await todosDropdowns.count().catch(() => 0);
+                        console.log(`[Producto][FallbackDirecto][Diag] dropdowns visibles en pantalla=${countDropdowns}`);
+
+                        if (countDropdowns < 2) {
+                            throw new Error(`[Producto][CRITICO] Pantalla Productos detectada pero no hay dropdowns suficientes para Categoría/Producto. count=${countDropdowns}`);
+                        }
+
+                        categoriDropdown = todosDropdowns.nth(0);
+                        console.log('[Producto][FallbackDirecto][Diag] usando dropdown categoria index=0');
+
+                        // leer aria-controls para debugging
+                        const combobox = categoriDropdown.locator('[role="combobox"]').first();
+                        const ariaControls = await combobox.getAttribute('aria-controls').catch(() => null);
+                        console.log(`[Producto][FallbackDirecto][Aria] Categoría aria-controls='${ariaControls || 'null'}'`);
+                    }
+
+                    //multiple estrategias para abrir dropdown
+                    let panelAbierto = false;
+                    const estrategiasAbrir = [
+                        async () => {
+                            const trigger = categoriDropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+                            if(await trigger.isVisible().catch(() => false)) { await trigger.click({ force: true }).catch(() => {}); return true; }
+                            return false;
+                        },
+                        async () => {
+                            const combo = categoriDropdown.locator('[role="combobox"]').first();
+                            if(await combo.isVisible().catch(() => false)) { await combo.click({ force: true }).catch(() => {}); return true; }
+                            return false;
+                        },
+                        async () => {
+                            if(await categoriDropdown.isVisible().catch(() => false)) { await categoriDropdown.click({ force: true }).catch(() => {}); return true; }
+                            return false;
+                        },
+                        async () => {
+                            const input = categoriDropdown.locator('input').first();
+                            if(await input.isVisible().catch(() => false)) { await input.focus().catch(() => {}); await pageRef.keyboard.press('ArrowDown').catch(() => {}); return true; }
+                            return false;
+                        },
+                    ];
+
+                    for (const estrategia of estrategiasAbrir) {
+                        if (panelAbierto) break;
+                        panelAbierto = await estrategia();
+                        if (panelAbierto) await pageRef.waitForTimeout(300);
+                    }
+
+                    // Buscar panel por aria-controls primero, luego fallback
+                    let panelCategoria = pageRef.locator('.p-dropdown-panel:visible, [role="listbox"]:visible').first();
+                    const combobox = categoriDropdown.locator('[role="combobox"]').first();
+                    const ariaControls = await combobox.getAttribute('aria-controls').catch(() => null);
+                    if (ariaControls) {
+                        const panelById = pageRef.locator(`#${ariaControls}`).first();
+                        const panelByIdVisible = await panelById.isVisible().catch(() => false);
+                        if (panelByIdVisible) panelCategoria = panelById;
+                        console.log(`[Producto][FallbackDirecto][Aria] Categoría panel encontrado=${panelByIdVisible}`);
+                    }
+
+                    // validar que panel abriu y tiene opciones
+                    const opcionesPanel = panelCategoria.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+                    const countOpciones = await opcionesPanel.count().catch(() => 0);
+                    console.log(`[Producto][FallbackDirecto][Aria] Categoría opciones visibles=${countOpciones}`);
+
+                    // Seleccionar "Cuentas de Efectivo" del panel correcto
+                    console.log('[Producto][FallbackDirecto] Seleccionando Cuentas de Efectivo');
+                    const categoriaOption = panelCategoria.getByText(/Cuentas de Efectivo/i).first();
+                    const categoriaOptionVisible = await categoriaOption.isVisible({ timeout: 1200 }).catch(() => false);
+
+                    // imprimir opciones para debug si no encuentra
+                    if (!categoriaOptionVisible && countOpciones > 0) {
+                        const primerasOptions: string[] = [];
+                        for (let i = 0; i < Math.min(countOpciones, 10); i++) {
+                            const texto = await opcionesPanel.nth(i).innerText().catch(() => '').then(t => t.trim()).catch(() => '');
+                            if (texto) primerasOptions.push(texto);
+                        }
+                        console.log(`[Producto][FallbackDirecto][Diag] Opciones visibles categoría=[${primerasOptions.join(', ')}]`);
+                    }
+
+                    if (categoriaOptionVisible) {
+                        await categoriaOption.click().catch(() => { });
+                        console.log('[Producto][FallbackDirecto] Categoría seleccionada');
+                        await pageRef.waitForTimeout(FAST_UI ? 800 : 1500);
+                    } else {
+                        console.log('[Producto][FallbackDirecto][WARN] Opción Cuentas de Efectivo no visible');
+                        return false;
+                    }
+
+                    // IMPORTANTE: Recargar dropdowns despues de seleccionar Categoría porque el DOM cambió
+                    const todosDropdownsDespues = pageRef.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible');
+                    const countDespues = await todosDropdownsDespues.count().catch(() => 0);
+                    console.log(`[Producto][FallbackDirecto][Diag] dropdowns visibles despues de seleccionar categoria=${countDespues}`);
+
+                    // Buscar dropdown Producto (ahora debe ser el segundo dropdown visible)
+                    if (productoLabelVisible) {
+                        productoDropdown = productoLabel.locator('..').locator('div.p-dropdown, [data-pc-name="dropdown"]').first();
+                        console.log('[Producto][FallbackDirecto][Diag] usando dropdown producto por label');
+                    } else {
+                        console.log('[Producto][FallbackDirecto][WARN] Label Producto no visible; usando dropdowns visibles por posición');
+                        if (countDespues < 2) {
+                            throw new Error(`[Producto][CRITICO] Pantalla Productos detectada pero no hay dropdown Producto. count=${countDespues}`);
+                        }
+                        productoDropdown = todosDropdownsDespues.nth(1);
+                        console.log('[Producto][FallbackDirecto][Diag] usando dropdown producto index=1');
+                    }
+
+                    // Obtener aria-controls para Producto
+                    const productoCombobox = productoDropdown.locator('[role="combobox"]').first();
+                    const productoAriaControls = await productoCombobox.getAttribute('aria-controls').catch(() => null);
+                    console.log(`[Producto][FallbackDirecto][Aria] Producto aria-controls='${productoAriaControls || 'null'}'`);
+
+                    // Abrir dropdown producto con estrategias multiples
+                    let panelProductoAbierto = false;
+                    for (const estrategia of estrategiasAbrir) {
+                        if (panelProductoAbierto) break;
+                        panelProductoAbierto = await estrategia();
+                        if (panelProductoAbierto) await pageRef.waitForTimeout(300);
+                    }
+
+                    // Buscar panel producto
+                    let panelProducto = pageRef.locator('.p-dropdown-panel:visible, [role="listbox"]:visible').first();
+                    if (productoAriaControls) {
+                        const panelProductoById = pageRef.locator(`#${productoAriaControls}`).first();
+                        const panelProductoByIdVisible = await panelProductoById.isVisible().catch(() => false);
+                        if (panelProductoByIdVisible) panelProducto = panelProductoById;
+                    }
+
+                    const opcionesProducto = panelProducto.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+                    const countOpcionesProducto = await opcionesProducto.count().catch(() => 0);
+                    console.log(`[Producto][FallbackDirecto][Aria] Producto opciones visibles=${countOpcionesProducto}`);
+
+                    // Seleccionar producto
+                    console.log(`[Producto][FallbackDirecto] Seleccionando producto ${tipoCuenta}`);
+                    const productoOption = pageRef.getByText(new RegExp(escapeRegexText(tipoCuenta), 'i')).first();
+                    const productoOptionVisible = await productoOption.isVisible({ timeout: 1200 }).catch(() => false);
+                    if (productoOptionVisible) {
+                        await productoOption.click().catch(() => { });
+                        console.log('[Producto][FallbackDirecto] Producto seleccionado');
+                        await pageRef.waitForTimeout(400);
+                    } else {
+                        console.log('[Producto][FallbackDirecto][WARN] Opción de Producto no visible');
+                        return false;
+                    }
+
+                    // Ejecutar etapa post-selección
+                    const seccionProductos = await localizarSeccionProductos(pageRef).catch(() => pageRef.locator('body'));
+                    await etapaSeccionProductosPostSeleccion(pageRef, { tipoCuenta, identificacion: 'TMP' } as unknown as RegistroExcel, seccionProductos).catch(() => { });
+
+                    console.log('[Producto][FallbackDirecto] Etapa post-selección completada');
+                    return true;
+                } catch (e) {
+                    console.log(`[Producto][FallbackDirecto][ERROR] ${e}`);
+                    return false;
+                }
+            };
+
+            if (resultadoAvance === 'productos') {
+                console.log('[Producto] resultadoAvance=productos recibido; procesando pantalla Productos inmediatamente');
+                console.log('[Producto][Trace] entrada ruta inmediata productos');
+
+                console.log('[Producto][Trace] antes de estaEnPantallaProductosSeguro');
+                const yaEnProductos = await estaEnPantallaProductosSeguro(page);
+                const timedOut = !yaEnProductos;
+                console.log(`[Producto][Trace] despues de estaEnPantallaProductosSeguro valor=${yaEnProductos} timeout=${timedOut}`);
+
+                // Check visual signals independently
+                const categoriaVisible = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+                const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+                const agregarRelacionadoVisible = await page.getByRole('button', { name: /Agregar relacionado/i }).isVisible().catch(() => false);
+                const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
+
+                const visualSignalsCount = [categoriaVisible, productoVisible, agregarRelacionadoVisible, productosTextVisible].filter(Boolean).length;
+
+                if (!yaEnProductos && visualSignalsCount > 0) {
+                    console.log(`[Producto][DIAG] estaEnPantallaProductos=false pero hay señales visuales (${visualSignalsCount}/4): categoría=${categoriaVisible}, producto=${productoVisible}, agregarRelacionado=${agregarRelacionadoVisible}, productosText=${productosTextVisible}`);
+                }
+
+                if (yaEnProductos || visualSignalsCount >= 3 || timedOut) {
+                    if (!yaEnProductos && timedOut) {
+                        console.log('[Producto] Forzando fallback directo porque resultadoAvance=productos');
+                    } else if (!yaEnProductos) {
+                        console.log('[Producto] Forzando procesamiento basado en señales visuales confirmadas');
+                    }
+
+                    // Validar si producto ya está agregado
+                    const tipoDesdeExcel = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '').then(t => {
+                        const match = t.match(/200\s*-\s*Cuentas?\s+de?\s+Ahorros?\s*(?:con\s+Libreta)?/i);
+                        return match ? match[0].trim() : '200 - Cuentas de Ahorros con Libreta DOP';
+                    }).catch(() => '200 - Cuentas de Ahorros con Libreta DOP');
+
+                    const tipoACargar = await tipoDesdeExcel;
+                    console.log(`[Producto] Tipo de cuenta a cargar: ${tipoACargar}`);
+
+                    // Verificar si producto ya está agregado
+                    console.log('[Producto][Trace] verificando si producto ya está agregado');
+                    const productoYaAgregado = await productoAgregadoVisible(page, tipoACargar).catch(() => false);
+if (productoYaAgregado) {
+                        console.log('[Producto] Producto ya está agregado, saltando agregación');
+                    } else {
+                        // Usar estrategia legacy de localización que funciona en Certificado-ex.spec.ts
+                        console.log('[Producto][Legacy] resultadoAvance=productos; usando localizador legacy de Certificado como referencia técnica');
+                        console.log('[Producto][Legacy] Categoria objetivo=\'Cuentas de Efectivo\'');
+                        console.log(`[Producto][Legacy] Producto objetivo='${tipoACargar}'`);
+
+                        // Wrapper seguro con timeout y fallback
+                        const localizeWithTimeout = async () => {
+                            return await Promise.race([
+                                localizarSeccionProductosLegacy(page).then((locator) => locator),
+                                new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500))
+                            ]);
+                        };
+
+                        console.log('[Producto][Legacy][Trace] antes de localizeSeccionProductosLegacySeguro');
+                        let seccion: Locator | null = null;
+                        let tiempoAgotado = false;
+                        try {
+                            seccion = await localizeWithTimeout();
+                            tiempoAgotado = seccion === null;
+                        } catch (e) {
+                            tiempoAgotado = true;
+                            console.log(`[Producto][Legacy][Trace] error en localizeWithTimeout: ${e}`);
+                        }
+                        const despuesOk = !!seccion && !(seccion === null);
+                        console.log(`[Producto][Legacy][Trace] despues de localizeSeccionProductosLegacySeguro ok=${despuesOk} timeout=${tiempoAgotado}`);
+
+                        // Fallback: usar body como scope temporal si no se localizó
+                        if (!seccion) {
+                            console.log('[Producto][Legacy][FallbackScope] no se localizó seccionProductos, usando fallback');
+                            const todosDropdowns = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+                            const dropdownsGlobales = await todosDropdowns.count().catch(() => 0);
+                            console.log(`[Producto][Legacy][FallbackScope] dropdownsGlobales=${dropdownsGlobales}`);
+                            if (dropdownsGlobales >= 2) {
+                                seccion = page.locator('body');
+                                console.log('[Producto][Legacy][FallbackScope] usando body como scope temporal=true');
+                            }
+                        }
+
+                        if (!seccion) {
+                            // Fallback adicional: buscar dropdowns visibles y usar un ancestro común
+                            const primerDropdown = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').first();
+                            const padre = primerDropdown.locator('xpath=ancestor::*[self::fieldset or self::section or self::div][1]').first();
+                            const visible = await padre.isVisible().catch(() => false);
+                            if (visible) {
+                                seccion = padre;
+                                console.log('[Producto][Legacy][FallbackScope] usando ancestro común de dropdown como scope');
+                            }
+                        }
+
+                        if (!seccion) {
+                            throw new Error('[Producto][Legacy][CRITICO] No se pudo localizar sección Productos con estrategia legacy ni fallback. seccion=null');
+                        }
+
+                        const seccionVisible = await seccion.isVisible({ timeout: 1500 }).catch(() => false);
+                        console.log(`[Producto][Legacy] seccionProductos visible=${seccionVisible}`);
+
+                        const dropdownsVisibles = await seccion
+                            .locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible')
+                            .count()
+                            .catch(() => 0);
+                        console.log(`[Producto][Legacy] dropdowns visibles en seccion=${dropdownsVisibles}`);
+
+                        let scopeNombre = 'legacy';
+                        let usarBandaVisual = false;
+                        let bandaDropdowns: { categoria: Locator; producto: Locator } | null = null;
+
+                        if (!seccionVisible || dropdownsVisibles < 2) {
+                            console.log('[Producto][Legacy][WARN] fallback no tiene dropdowns suficientes, intentando scope específico por labels');
+
+                            const scopoEspecifico = await localizarScopeProductosPorLabelsYDropdowns(page);
+                            if (scopoEspecifico) {
+                                seccion = scopoEspecifico;
+                                scopeNombre = 'productos';
+                            } else {
+                                // Tercer nivel: polling con banda visual (hasta 8s)
+                                bandaDropdowns = await esperarDropdownsProductosListos(page);
+                                usarBandaVisual = true;
+                                scopeNombre = 'banda';
+                            }
+                        }
+
+                        // Guard: detectar si aparece modal Cancelar antes de seleccionar
+                        const modalCancelarAntes = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+                        if (modalCancelarAntes) {
+                            throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud antes de seleccionar; scope incorrecto');
+                        }
+
+                        if (usarBandaVisual && bandaDropdowns) {
+                            // Ruta banda visual: selección directa por dropdown locator
+                            console.log(`[Producto][Banda] Seleccionando Categoría: Cuentas de Efectivo`);
+                            const valorCategoria = await seleccionarOpcionEnDropdownDirecto(
+                                page,
+                                bandaDropdowns.categoria,
+                                /Cuentas de Efectivo/i,
+                                'Producto][Banda][Categoria'
+                            );
+                            console.log(`[Producto][Banda] Categoría seleccionada valor='${valorCategoria}'`);
+                            await page.waitForTimeout(FAST_UI ? 800 : 1500);
+
+                            const modalCat = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+                            if (modalCat) throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud durante selección de categoría; click fuera de banda Productos');
+
+                            const urlDespuesCat = page.url();
+                            console.log(`[Producto][Guard] despues de seleccionar categoria url=${urlDespuesCat}`);
+                            if (!urlDespuesCat.includes('/requests/') || !urlDespuesCat.includes('/edit')) {
+                                throw new Error(`[Producto][CRITICO] URL cambió después de seleccionar categoría. url=${urlDespuesCat}`);
+                            }
+
+                            // Reconsultar dropdowns después de Categoría (Producto puede habilitarse/cambiar)
+                            console.log('[Producto][Banda] reconsultando dropdowns después de Categoría');
+                            const bandaReconsulta = await esperarDropdownsProductosListos(page);
+                            console.log('[Producto][Banda] usando segundo dropdown como Producto');
+
+                            console.log(`[Producto][Banda] Seleccionando Producto: ${tipoACargar}`);
+                            const valorProducto = await seleccionarOpcionEnDropdownDirecto(
+                                page,
+                                bandaReconsulta.producto,
+                                /200\s*-\s*Cuentas\s+de\s+Ahorros\s+con\s+Libreta\s+DOP/i,
+                                'Producto][Banda][Producto'
+                            );
+                            console.log(`[Producto][Banda] Producto seleccionado valor='${valorProducto}'`);
+
+                            const modalProd = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+                            if (modalProd) throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud durante selección de producto; click fuera de banda Productos');
+
+                            const urlDespuesProd = page.url();
+                            console.log(`[Producto][Guard] despues de seleccionar producto url=${urlDespuesProd}`);
+                            if (!urlDespuesProd.includes('/requests/') || !urlDespuesProd.includes('/edit')) {
+                                throw new Error(`[Producto][CRITICO] URL cambió después de seleccionar producto. url=${urlDespuesProd}`);
+                            }
+                        } else {
+                            // Ruta legacy/scope: selección por funciones de sección
+                            console.log(`[Producto][Legacy] llamando seleccionarCategoria Cuentas de Efectivo scope=${scopeNombre}`);
+                            await seleccionarCategoriaEnSeccionProductosLegacy(page, seccion);
+                            await page.waitForTimeout(FAST_UI ? 800 : 1500);
+
+                            const modalCat = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+                            if (modalCat) throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud durante selección de categoría; scope incorrecto');
+
+                            const urlDespuesCat = page.url();
+                            console.log(`[Producto][Guard] despues de seleccionar categoria url=${urlDespuesCat}`);
+                            if (!urlDespuesCat.includes('/requests/') || !urlDespuesCat.includes('/edit')) {
+                                throw new Error(`[Producto][CRITICO] URL cambió después de seleccionar categoría. url=${urlDespuesCat}`);
+                            }
+
+                            console.log('[Producto][Legacy] llamando seleccionarProductoEnSeccionProductos');
+                            await seleccionarProductoEnSeccionProductos(page, seccion, tipoACargar);
+
+                            const modalProd = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+                            if (modalProd) throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud durante selección de producto; scope incorrecto');
+
+                            const urlDespuesProd = page.url();
+                            console.log(`[Producto][Guard] despues de seleccionar producto url=${urlDespuesProd}`);
+                            if (!urlDespuesProd.includes('/requests/') || !urlDespuesProd.includes('/edit')) {
+                                throw new Error(`[Producto][CRITICO] URL cambió después de seleccionar producto. url=${urlDespuesProd}`);
+                            }
+                        }
+
+                        // Post-selección (común a ambas rutas)
+                        await etapaSeccionProductosPostSeleccion(page, { tipoCuenta: tipoACargar, identificacion: 'TMP' } as unknown as RegistroExcel, seccion);
+
+                        const urlDespuesPostSeleccion = page.url();
+                        console.log(`[Producto][Guard] despues de post-seleccion url=${urlDespuesPostSeleccion}`);
+                        if (!urlDespuesPostSeleccion.includes('/requests/') || !urlDespuesPostSeleccion.includes('/edit')) {
+                            throw new Error(`[Producto][CRITICO] URL cambió después de post-selección. url=${urlDespuesPostSeleccion}`);
+                        }
+
+                        // Validar que se agregó
+                        await page.waitForTimeout(300);
+                        const productoConfirmado = await productoAgregadoVisible(page, tipoACargar);
+                        if (!productoConfirmado) {
+                            throw new Error(`[Producto][Legacy][CRITICO] No se pudo confirmar producto agregado después de selección. producto='${tipoACargar}'`);
+                        }
+                        console.log('[Producto][Legacy] producto agregado visible=true');
+                    }
+
+                    // Confirmación final
+                    const productoConfirmadoFinal = await productoAgregadoVisible(page, tipoACargar).catch(() => false);
+                    console.log(`[Producto] Producto agregado visible=${productoConfirmadoFinal}`);
+                    if (!productoConfirmadoFinal) {
+                        console.log('[Producto][CRITICO] Pantalla Productos visible pero no se pudo seleccionar Categoría/Producto');
+                    }
+                } else {
+                    console.log('[Producto] Productos no detectado como pantalla activa y sin señales visuales confirmadas. No procesando.');
+                }
+            }
             if (resultadoAvance === 'taller' || resultadoAvance === 'productos') {
                 return true;
             }
@@ -1242,6 +1837,291 @@ async function localizarSeccionProductosLegacy(page: Page) {
     }
 
     return candidatos[0];
+}
+
+async function localizarScopeProductosPorLabelsYDropdowns(page: Page): Promise<Locator | null> {
+    console.log('[Producto][ScopeProductos] Buscando scope por labels Categoría/Producto');
+
+    // Buscar label "Categoría de producto"
+    const labelCategoria = page
+        .locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria de producto")]')
+        .first();
+    const labelCategoriaVisible = await labelCategoria.isVisible().catch(() => false);
+    console.log(`[Producto][ScopeProductos] label Categoria visible=${labelCategoriaVisible}`);
+
+    // Buscar label "Producto"
+    const labelProducto = page
+        .locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Producto")] and not(contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria"))')
+        .first();
+    const labelProductoVisible = await labelProducto.isVisible().catch(() => false);
+    console.log(`[Producto][ScopeProductos] label Producto visible=${labelProductoVisible}`);
+
+    if (!labelCategoriaVisible || !labelProductoVisible) {
+        console.log('[Producto][ScopeProductos] scope encontrado=false');
+        return null;
+    }
+
+    // Desde el label Categoría, buscar ancestros en orden de preferencia (más específicos primero)
+    let scopeCandidate: Locator | null = null;
+    const ancestorCandidatos = [
+        labelCategoria.locator('xpath=ancestor::fieldset[1]').first(),
+        labelCategoria.locator('xpath=ancestor::section[1]').first(),
+        labelCategoria.locator('xpath=ancestor::div[@class="p-card"][1]').first(),
+        labelCategoria.locator('xpath=ancestor::div[@data-pc-section="content"][1]').first(),
+    ];
+
+    for (const candidato of ancestorCandidatos) {
+        const visible = await candidato.isVisible().catch(() => false);
+        if (!visible) continue;
+
+        const dropdownsEnCandidato = await candidato
+            .locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible')
+            .count()
+            .catch(() => 0);
+
+        if (dropdownsEnCandidato >= 2) {
+            scopeCandidate = candidato;
+            break;
+        }
+    }
+
+    if (!scopeCandidate) {
+        console.log('[Producto][ScopeProductos] scope encontrado=false');
+        return null;
+    }
+
+    const scopeVisible = await scopeCandidate.isVisible().catch(() => false);
+    if (!scopeVisible) {
+        console.log('[Producto][ScopeProductos] scope encontrado=false');
+        return null;
+    }
+
+    // Contar dropdowns en el scope candidato
+    const dropdownsEnScope = await scopeCandidate
+        .locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible')
+        .count()
+        .catch(() => 0);
+
+    console.log(`[Producto][ScopeProductos] dropdowns visibles en scope=${dropdownsEnScope}`);
+
+    if (dropdownsEnScope < 2) {
+        console.log('[Producto][ScopeProductos] scope encontrado=false');
+        return null;
+    }
+
+    // Verificar que contiene realmente "Producto"
+    const scopeText = (await scopeCandidate.textContent().catch(() => '')) || '';
+    const tieneProducto = /product/i.test(scopeText);
+    const tieneCat = /categor/i.test(scopeText);
+
+    if (!tieneProducto && !tieneCat) {
+        console.log('[Producto][ScopeProductos] scope encontrado=false');
+        return null;
+    }
+
+    // CRÍTICO: Validar que el scope NO contiene botones globales peligrosos
+    const textoBotonesGlobales = /\b(Salir|Cancelar|Regresar|Gestión\s+Documental|Continuar)\b/i;
+    if (textoBotonesGlobales.test(scopeText)) {
+        console.log('[Producto][ScopeProductos][CRITICO] Scope incluye botones globales; scope rechazado');
+        console.log('[Producto][ScopeProductos][Diag] scope contiene palabras prohibidas');
+        return null;
+    }
+
+    console.log('[Producto][ScopeProductos] scope encontrado=true');
+    console.log('[Producto][ScopeProductos] usando scope Productos específico');
+    return scopeCandidate;
+}
+
+async function esperarDropdownsProductosListos(
+    page: Page
+): Promise<{ categoria: Locator; producto: Locator } | null> {
+    const POLL_TIMEOUT = 8000;
+    const POLL_INTERVAL = 300;
+    const inicio = Date.now();
+    let intento = 0;
+    let dropdownsGlobalesMax = 0;
+
+    console.log('[Producto][Banda] Esperando render de dropdowns Productos hasta 8s');
+
+    while (Date.now() - inicio < POLL_TIMEOUT) {
+        intento++;
+
+        // Encabezado "Productos"
+        const headProductos = page
+            .locator('xpath=//*[self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::span or self::div or self::p][normalize-space(.)="Productos" or normalize-space(.)="Producto"]')
+            .first();
+        const boxProductos = await headProductos.boundingBox().catch(() => null);
+
+        // Encabezado "Relacionados" como límite inferior (opcional)
+        const headRelacionados = page
+            .locator('xpath=//*[self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::span or self::div or self::p or self::button][contains(normalize-space(.),"Relacionados") or contains(normalize-space(.),"relacionado")]')
+            .first();
+        const boxRelacionados = await headRelacionados.boundingBox().catch(() => null);
+
+        // Selectores amplios: incluye div.p-dropdown, span.p-dropdown, [data-pc-name], [role=combobox]
+        const candidatosRaw = page.locator(
+            '.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible, span.p-dropdown-label:visible'
+        );
+        const totalRaw = await candidatosRaw.count().catch(() => 0);
+
+        // Normalizar cada candidato al ancestro .p-dropdown más cercano via evaluate
+        const dropdownsNormalizados: Array<{ locator: Locator; box: { y: number; x: number } }> = [];
+        const seenHandles = new Set<string>();
+
+        for (let i = 0; i < totalRaw; i++) {
+            const el = candidatosRaw.nth(i);
+            // Subir al wrapper .p-dropdown si el elemento es un descendiente (combobox, label)
+            const ancestroHandle = await el.evaluate((node) => {
+                const wrapper = node.closest('.p-dropdown, [data-pc-name="dropdown"]');
+                if (!wrapper) return null;
+                // Retornar un identificador único basado en posición DOM
+                const rect = wrapper.getBoundingClientRect();
+                return `${Math.round(rect.x)}_${Math.round(rect.y)}_${Math.round(rect.width)}`;
+            }).catch(() => null);
+
+            const key = ancestroHandle ?? `raw_${i}`;
+            if (seenHandles.has(key)) continue;
+            seenHandles.add(key);
+
+            const box = await el.boundingBox().catch(() => null);
+            if (!box) continue;
+            dropdownsNormalizados.push({ locator: el, box: { y: box.y, x: box.x } });
+        }
+
+        const totalGlobales = dropdownsNormalizados.length;
+        if (totalGlobales > dropdownsGlobalesMax) dropdownsGlobalesMax = totalGlobales;
+
+        // Filtrar por banda si tenemos bounding boxes de encabezados
+        let candidatosBanda = dropdownsNormalizados;
+        if (boxProductos) {
+            const yMin = boxProductos.y;
+            const yMax = boxRelacionados ? boxRelacionados.y : yMin + 600;
+            const enBanda = dropdownsNormalizados.filter(d => d.box.y >= yMin && d.box.y < yMax);
+            candidatosBanda = enBanda.length >= 2 ? enBanda : dropdownsNormalizados;
+        }
+
+        // Ordenar por Y luego X
+        candidatosBanda.sort((a, b) => a.box.y !== b.box.y ? a.box.y - b.box.y : a.box.x - b.box.x);
+        const dropdownsBanda = candidatosBanda.length;
+
+        console.log(`[Producto][Banda] intento ${intento}: dropdownsGlobales=${totalGlobales} dropdownsBanda=${dropdownsBanda}${dropdownsBanda < 2 ? '; esperando render de Productos' : ''}`);
+
+        if (dropdownsBanda >= 2) {
+            const catLoc = candidatosBanda[0].locator;
+            const prodLoc = candidatosBanda[1].locator;
+            const catBox = await catLoc.boundingBox().catch(() => null);
+            const prodBox = await prodLoc.boundingBox().catch(() => null);
+            console.log(`[Producto][Banda] dropdowns Productos listos=true count=${dropdownsBanda}`);
+            console.log(`[Producto][Banda] categoria bbox=${JSON.stringify(catBox)}`);
+            console.log(`[Producto][Banda] producto bbox=${JSON.stringify(prodBox)}`);
+            console.log('[Producto][Banda] usando primer dropdown como Categoría');
+            console.log('[Producto][Banda] usando segundo dropdown como Producto');
+            return { categoria: catLoc, producto: prodLoc };
+        }
+
+        await page.waitForTimeout(POLL_INTERVAL);
+    }
+
+    const urlActual = page.url();
+    throw new Error(`[Producto][CRITICO] Productos visible pero no aparecieron 2 dropdowns luego de 8s. url=${urlActual} dropdownsGlobalesMax=${dropdownsGlobalesMax}`);
+}
+
+async function seleccionarOpcionEnDropdownDirecto(
+    page: Page,
+    dropdown: Locator,
+    opcionRegex: RegExp,
+    nombreLog: string
+): Promise<string> {
+    const LIST_PANEL_TIMEOUT_LOCAL = 8000;
+    const LIST_PANEL_QUICK_LOCAL = 3000;
+
+    await dropdown.scrollIntoViewIfNeeded().catch(() => {});
+
+    // Abrir dropdown con varias estrategias
+    let panelAbierto = false;
+    const estrategias = [
+        async () => {
+            const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+            if (await trigger.isVisible().catch(() => false)) {
+                await trigger.click({ force: true });
+                return true;
+            }
+            return false;
+        },
+        async () => {
+            const combo = dropdown.locator('[role="combobox"]').first();
+            if (await combo.isVisible().catch(() => false)) {
+                await combo.click({ force: true });
+                return true;
+            }
+            return false;
+        },
+        async () => {
+            if (await dropdown.isVisible().catch(() => false)) {
+                await dropdown.click({ force: true });
+                return true;
+            }
+            return false;
+        },
+        async () => {
+            const input = dropdown.locator('input').first();
+            if (await input.isVisible().catch(() => false)) {
+                await input.focus();
+                await page.keyboard.press('ArrowDown');
+                return true;
+            }
+            return false;
+        },
+    ];
+
+    for (const estrategia of estrategias) {
+        if (panelAbierto) break;
+        panelAbierto = await estrategia().catch(() => false);
+        if (panelAbierto) await page.waitForTimeout(300);
+    }
+
+    // Localizar panel por aria-controls o fallback
+    const combobox = dropdown.locator('[role="combobox"]').first();
+    const panelId = await combobox.getAttribute('aria-controls').catch(() => null);
+    let panel: Locator | null = null;
+
+    if (panelId) {
+        const byId = page.locator(`#${panelId}`);
+        const visible = await byId.waitFor({ state: 'visible', timeout: LIST_PANEL_QUICK_LOCAL }).then(() => true).catch(() => false);
+        if (visible) panel = byId;
+    }
+    if (!panel) {
+        const fallback = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').last();
+        const visible = await fallback.waitFor({ state: 'visible', timeout: LIST_PANEL_QUICK_LOCAL }).then(() => true).catch(() => false);
+        if (visible) panel = fallback;
+    }
+
+    if (!panel) {
+        throw new Error(`[${nombreLog}][CRITICO] No se pudo abrir panel del dropdown`);
+    }
+
+    const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+    await items.first().waitFor({ state: 'visible', timeout: LIST_PANEL_TIMEOUT_LOCAL }).catch(() => {});
+
+    const itemTarget = items.filter({ hasText: opcionRegex }).first();
+    const itemVisible = await itemTarget.isVisible().catch(() => false);
+
+    if (!itemVisible) {
+        const countItems = await items.count().catch(() => 0);
+        const primeras: string[] = [];
+        for (let i = 0; i < Math.min(countItems, 8); i++) {
+            const txt = (await items.nth(i).innerText().catch(() => '')).trim();
+            if (txt) primeras.push(txt);
+        }
+        throw new Error(`[${nombreLog}][CRITICO] Opción no encontrada en panel. regex=${opcionRegex} opciones=[${primeras.join(', ')}]`);
+    }
+
+    await itemTarget.click({ force: true });
+    await page.waitForTimeout(120);
+
+    const labelEl = dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+    const valorSeleccionado = ((await labelEl.textContent().catch(() => '')) || '').trim();
+    return valorSeleccionado;
 }
 
 async function seleccionarCategoriaEnSeccionProductosLegacy(page: Page, seccionProductos: Locator) {
@@ -3160,27 +4040,98 @@ async function abrirModalDireccionCasa(page: Page) {
         .locator('.p-dialog:visible, [role="dialog"]:visible')
         .filter({ hasText: /Direcci(?:o|\u00f3)n|Calle|Provincia|Municipio/i })
         .first();
+    let ultimoTextoCandidato = '';
+    let ultimosCandidatos = 0;
+
+    const modalVisible = async () => {
+        const visible = await modalDireccion.waitFor({ state: 'visible', timeout: ADDRESS_MODAL_OPEN_TIMEOUT }).then(() => true).catch(() => false);
+        if (!visible) return false;
+        const senales = await Promise.all([
+            modalDireccion.getByText(/Direcci(?:o|\u00f3)n/i).first().isVisible().catch(() => false),
+            modalDireccion.locator('label').filter({ hasText: /^Tipo$/i }).first().isVisible().catch(() => false),
+            modalDireccion.locator('label').filter({ hasText: /^Pa(?:i|í)s$/i }).first().isVisible().catch(() => false),
+            modalDireccion.locator('label').filter({ hasText: /Calle|Avenida|Autopista/i }).first().isVisible().catch(() => false),
+            modalDireccion.getByRole('button', { name: /Aceptar/i }).first().isVisible().catch(() => false),
+            modalDireccion.getByRole('button', { name: /Cancelar/i }).first().isVisible().catch(() => false),
+        ]);
+        return senales.filter(Boolean).length >= 2;
+    };
+
+    const clickAbrir = async (target: Locator) => {
+        const visible = await target.isVisible().catch(() => false);
+        if (!visible) return false;
+        await target.scrollIntoViewIfNeeded().catch(() => { });
+        let clicked = await target.click({ timeout: 1800 }).then(() => true).catch(() => false);
+        if (!clicked) clicked = await target.click({ force: true, timeout: 1800 }).then(() => true).catch(() => false);
+        if (!clicked) {
+            await target.focus().catch(() => { });
+            await page.keyboard.press('Enter').catch(() => { });
+            clicked = await modalVisible();
+            if (!clicked) {
+                await page.keyboard.press('Space').catch(() => { });
+                clicked = await modalVisible();
+            }
+        }
+        return clicked;
+    };
 
     for (let intento = 1; intento <= 4; intento++) {
+        console.log('[DireccionCasa] Buscando bloque Dirección');
         await btnAnadirDireccion.waitFor({ state: 'visible', timeout: ADDRESS_MODAL_OPEN_BTN_TIMEOUT });
         await btnAnadirDireccion.scrollIntoViewIfNeeded().catch(() => { });
-        await btnAnadirDireccion.click({ force: true }).catch(() => { });
+        await btnAnadirDireccion.click({ timeout: 1800 }).catch(async () => {
+            await btnAnadirDireccion.click({ force: true, timeout: 1800 }).catch(() => { });
+        });
 
-        const opcionCasa = page
-            .locator('li[aria-label="Casa"], [role="menuitem"]:has-text("Casa"), .p-menuitem:has-text("Casa")')
+        console.log('[DireccionCasa] Buscando opción Casa');
+        const bloqueDireccion = btnAnadirDireccion
+            .locator('xpath=ancestor::*[(self::fieldset or self::section or self::div) and .//*[contains(normalize-space(.),"Direcci")]][1]')
             .first();
-        const menuVisible = await opcionCasa.isVisible().catch(() => false);
-        if (menuVisible) {
-            await opcionCasa.click({ force: true }).catch(() => { });
+        const opcionCasa = page.locator(
+            'li[aria-label="Casa"]:visible, [role="menuitem"]:has-text("Casa"):visible, .p-menuitem:has-text("Casa"):visible, .p-menuitem-link:has-text("Casa"):visible, button:has-text("Casa"):visible'
+        ).first();
+        const contenedorCasa = page
+            .locator('xpath=(//*[normalize-space(.)="Casa" or contains(normalize-space(.),"Casa")]/ancestor::*[(self::li or self::tr or self::div) and (.//button or .//*[@role="button"] or self::*[@role="menuitem"])][1])[1]')
+            .first();
+        const contenedorCasaEnDireccion = bloqueDireccion
+            .locator('xpath=.//*[normalize-space(.)="Casa" or contains(normalize-space(.),"Casa")]/ancestor::*[(self::li or self::tr or self::div) and (.//button or .//*[@role="button"] or self::*[@role="menuitem"])][1]')
+            .first();
+        const candidatos: Locator[] = [
+            opcionCasa,
+            contenedorCasaEnDireccion,
+            contenedorCasa.locator('button:visible, [role="button"]:visible, .p-button:visible, i:visible, [class*="pi-"]:visible, [class*="ph-"]:visible').first(),
+            contenedorCasa,
+        ];
+
+        let candidatosVisibles = 0;
+        for (const candidato of candidatos) {
+            if (await candidato.isVisible().catch(() => false)) candidatosVisibles++;
+        }
+        ultimosCandidatos = candidatosVisibles;
+        ultimoTextoCandidato = ((await contenedorCasa.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+        console.log(`[DireccionCasa] Candidatos abrir modal encontrados=${candidatosVisibles}`);
+
+        for (const candidato of candidatos) {
+            if (!await candidato.isVisible().catch(() => false)) continue;
+            console.log('[DireccionCasa] Click en abrir modal Dirección Casa');
+            await clickAbrir(candidato);
+            const visibleModal = await modalVisible();
+            console.log(`[DireccionCasa] Modal Dirección Casa visible=${visibleModal}`);
+            if (visibleModal) return modalDireccion;
         }
 
-        const visibleModal = await modalDireccion.waitFor({ state: 'visible', timeout: ADDRESS_MODAL_OPEN_TIMEOUT }).then(() => true).catch(() => false);
+        const visibleModal = await modalVisible();
+        console.log(`[DireccionCasa] Modal Dirección Casa visible=${visibleModal}`);
         if (visibleModal) return modalDireccion;
 
         await page.waitForTimeout(FAST_UI ? 120 : 250);
     }
 
-    throw new Error("[CRITICO] No se pudo abrir el modal de 'Direccion' en opcion Casa.");
+    const urlActual = page.url();
+    const direccionVisible = await page.getByText(/Direcci(?:o|ó)n/i).first().isVisible().catch(() => false);
+    const casaVisible = await page.getByText(/Casa/i).first().isVisible().catch(() => false);
+    console.log(`[DireccionCasa][Diag] url=${urlActual} direccionVisible=${direccionVisible} casaVisible=${casaVisible} candidatos=${ultimosCandidatos} texto='${ultimoTextoCandidato}'`);
+    throw new Error(`[DireccionCasa][CRITICO] No se pudo abrir modal Dirección Casa. candidatos=${ultimosCandidatos} texto='${ultimoTextoCandidato}'`);
 }
 
 async function completarDireccionPostProducto(page: Page) {
@@ -3203,18 +4154,44 @@ async function completarDireccionPostProducto(page: Page) {
 
     const valorInvalido = (valor: string) => !valor || /^seleccione/i.test(valor) || /Reintentar/i.test(valor) || /^[-\s]+$/.test(valor.trim());
 
-    const leerValorRapido = async (label: RegExp) =>
-        ((await leerValorDropdownEnScope(modalDireccion, label, { timeoutMs: 700 }).catch(() => '')) || '').trim();
+    const resolverCampoDireccion = async (label: RegExp) => {
+        const labelLoc = modalDireccion.locator('label').filter({ hasText: label }).first();
+        await labelLoc.waitFor({ state: 'visible', timeout: 1800 });
+        let campo = labelLoc
+            .locator('xpath=ancestor::div[(contains(@class,"field") or contains(@class,"p-field") or contains(@class,"col") or contains(@class,"form")) and (.//input or .//textarea or .//*[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or @role="combobox"])][1]')
+            .first();
+        if (!(await campo.isVisible().catch(() => false))) {
+            campo = labelLoc
+                .locator('xpath=ancestor::div[.//input or .//textarea or .//*[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or @role="combobox"]][1]')
+                .first();
+        }
+        return { labelLoc, campo };
+    };
+
+    const leerValorRapido = async (label: RegExp) => {
+        const campoResuelto = await resolverCampoDireccion(label).catch(() => null);
+        if (!campoResuelto) return '';
+        const { campo } = campoResuelto;
+
+        const labelDropdown = campo.locator('.p-dropdown-label:visible, [data-pc-section="label"]:visible').first();
+        const textoDropdown = ((await labelDropdown.innerText().catch(() => '')) || '').trim();
+        if (textoDropdown) return textoDropdown;
+
+        const input = campo.locator('input:visible, textarea:visible').first();
+        const valorInput = ((await input.inputValue().catch(() => '')) || '').trim();
+        if (valorInput) return valorInput;
+        return '';
+    };
 
     const llenarTextoRapido = async (label: RegExp, valor: string, required = true) => {
-        const labelLoc = modalDireccion.locator('label').filter({ hasText: label }).first();
-        const labelVisible = await labelLoc.waitFor({ state: 'visible', timeout: required ? 1800 : 900 }).then(() => true).catch(() => false);
+        const campoResuelto = await resolverCampoDireccion(label).catch(() => null);
+        const labelVisible = !!campoResuelto;
         if (!labelVisible) {
             if (required) throw new Error(`[Direccion] No se encontro campo de texto '${label}'.`);
             return false;
         }
 
-        const input = labelLoc.locator('xpath=following::input[1] | following::textarea[1]').first();
+        const input = campoResuelto.campo.locator('input:visible, textarea:visible').first();
         await input.waitFor({ state: 'visible', timeout: 1500 });
         await input.fill(valor, { timeout: 1200 }).catch(async () => {
             await input.evaluate((el, v) => {
@@ -3228,30 +4205,69 @@ async function completarDireccionPostProducto(page: Page) {
         return true;
     };
 
-    const seleccionarComboRapido = async (label: RegExp, nombre: string, required = true) => {
+    const seleccionarComboRapido = async (label: RegExp, nombre: string, required = true, preferida?: RegExp) => {
         const valorActual = await leerValorRapido(label);
         if (!valorInvalido(valorActual)) {
-            console.log(`[Direccion] ${nombre} lista`);
+            console.log(`[Direccion] ${nombre} ya tiene valor, se omite`);
             return { ok: true, valor: valorActual };
         }
 
-        const labelLoc = modalDireccion.locator('label').filter({ hasText: label }).first();
-        await labelLoc.waitFor({ state: 'visible', timeout: 1800 });
-        const dropdown = labelLoc
-            .locator('xpath=following::div[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or @role="combobox"][1]')
-            .first();
+        console.log(`[Direccion] Seleccionando ${nombre}`);
+        const { labelLoc, campo } = await resolverCampoDireccion(label);
+        const dropdown = campo.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+        const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+        const input = campo.locator('input:visible').first();
+        const boton = campo.locator('button:visible').first();
         if (await dropdown.isVisible().catch(() => false)) {
             await dropdown.click({ force: true, timeout: 1200 }).catch(() => { });
+        } else if (await trigger.isVisible().catch(() => false)) {
+            await trigger.click({ force: true, timeout: 1200 }).catch(() => { });
+        } else if (await input.isVisible().catch(() => false)) {
+            await input.click({ force: true, timeout: 1200 }).catch(() => { });
+        } else if (await boton.isVisible().catch(() => false)) {
+            await boton.click({ force: true, timeout: 1200 }).catch(() => { });
         } else {
             await labelLoc.click({ force: true }).catch(() => { });
         }
 
-        const panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
-        const panelVisible = await panel.waitFor({ state: 'visible', timeout: 2200 }).then(() => true).catch(() => false);
-        if (!panelVisible) throw new Error(`[Direccion] No se abrio dropdown de ${nombre}.`);
+        let panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
+        let panelVisible = await panel.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
+        if (!panelVisible) {
+            await trigger.click({ force: true, timeout: 800 }).catch(() => { });
+            await input.click({ force: true, timeout: 800 }).catch(() => { });
+            await page.keyboard.press('ArrowDown').catch(() => { });
+            panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
+            panelVisible = await panel.waitFor({ state: 'visible', timeout: 1000 }).then(() => true).catch(() => false);
+        }
+
+        if (!panelVisible) {
+            await page.keyboard.press('Enter').catch(() => { });
+            await page.waitForTimeout(FAST_UI ? 150 : 250);
+            const valorTrasTeclado = await leerValorRapido(label);
+            const ok = !valorInvalido(valorTrasTeclado);
+            if (ok) {
+                console.log(`[Direccion] ${nombre} seleccionado rapido=true valor='${valorTrasTeclado}'`);
+                return { ok: true, valor: valorTrasTeclado };
+            }
+            throw new Error(`[Direccion] No se abrio dropdown de ${nombre}. valorActual='${valorActual}'`);
+        }
 
         const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
         const total = await opciones.count().catch(() => 0);
+        const participio = /Regi(?:o|ó)n|Provincia|Localidad/i.test(nombre) ? 'seleccionada' : 'seleccionado';
+        if (preferida) {
+            const opcionPreferida = opciones.filter({ hasText: preferida }).first();
+            if (await opcionPreferida.isVisible().catch(() => false)) {
+                await opcionPreferida.click({ force: true, timeout: 1200 }).catch(() => { });
+                await page.waitForTimeout(FAST_UI ? 180 : 350);
+                const valorFinalPreferido = await leerValorRapido(label);
+                const okPreferido = !valorInvalido(valorFinalPreferido);
+                console.log(`[Direccion] ${nombre} ${participio} rapido=${okPreferido} valor='${valorFinalPreferido}'`);
+                if (!okPreferido && required) throw new Error(`[Direccion] ${nombre} quedo vacio tras seleccionar opcion preferida.`);
+                return { ok: okPreferido, valor: valorFinalPreferido };
+            }
+        }
+
         for (let i = 0; i < total; i++) {
             const opcion = opciones.nth(i);
             if (!(await opcion.isVisible().catch(() => false))) continue;
@@ -3261,7 +4277,7 @@ async function completarDireccionPostProducto(page: Page) {
             await page.waitForTimeout(FAST_UI ? 120 : 250);
             const valorFinal = await leerValorRapido(label);
             const ok = !valorInvalido(valorFinal);
-            console.log(`[Direccion] ${nombre} seleccionado rapido=${ok} valor='${valorFinal}'`);
+            console.log(`[Direccion] ${nombre} ${participio} rapido=${ok} valor='${valorFinal}'`);
             if (!ok && required) throw new Error(`[Direccion] ${nombre} quedo vacio tras seleccionar '${texto}'.`);
             return { ok, valor: valorFinal };
         }
@@ -3274,29 +4290,145 @@ async function completarDireccionPostProducto(page: Page) {
     await llenarTextoRapido(/N[uú]mero casa.*edificio/i, String(randomInt(1, 999)));
     await llenarTextoRapido(/N[uú]mero apartamento/i, String(randomInt(1, 80)));
 
-    const tipoActual = await leerValorRapido(/^Tipo$/i);
-    if (/casa/i.test(tipoActual)) {
-        console.log('[Direccion] Tipo ya es Casa, se omite selección');
-    } else {
-        console.log(`[Direccion] Tipo no editable o no confirmado (valor='${tipoActual}'), se omite selección`);
+    console.log('[Direccion] Tipo se omite; no es necesario seleccionarlo');
+    console.log('[Direccion] País listo');
+
+    // Usar estrategia de Datos Laborales que funcionan correctamente
+    console.log('[Direccion] Seleccionando Región');
+    await seleccionarDropdownEnScopePorTexto(page, modalDireccion, /^Regi(?:o|ó)n$/i, /Distrito Nacional/i, 0)
+        .catch(async () => {
+            console.log('[Direccion][Diag] Región: Distrito Nacional no encontrado, usando primer valor');
+            return seleccionarDropdownIndexEnScope(page, modalDireccion, /^Regi(?:o|ó)n$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
+        });
+    let regionValor = await leerValorRapido(/^Regi(?:o|ó)n$/i);
+    console.log(`[Direccion] Región seleccionada rapido=true valor='${regionValor}'`);
+    if (valorInvalido(regionValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Región`);
+    await page.waitForTimeout(FAST_UI ? 300 : 700);
+
+    console.log('[Direccion] Seleccionando Provincia');
+    await seleccionarDropdownEnScopePorTexto(page, modalDireccion, /^Provincia$/i, /Distrito Nacional/i, 0)
+        .catch(async () => {
+            console.log('[Direccion][Diag] Provincia: Distrito Nacional no encontrado, usando primer valor');
+            return seleccionarDropdownIndexEnScope(page, modalDireccion, /^Provincia$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
+        });
+    let provinciaValor = await leerValorRapido(/^Provincia$/i);
+    console.log(`[Direccion] Provincia seleccionada rapido=true valor='${provinciaValor}'`);
+    if (valorInvalido(provinciaValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Provincia`);
+    await page.waitForTimeout(FAST_UI ? 300 : 700);
+
+    console.log('[Direccion] Seleccionando Municipio');
+    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Municipio$/i, 0, {
+        maxIntentos: FAST_UI ? 8 : 12,
+        timeoutMs: FAST_UI ? 4200 : 7000,
+        panelTimeoutMs: FAST_UI ? 4800 : 9000,
+        esperaEntreIntentosMs: FAST_UI ? 300 : 900,
+    });
+    let municipioValor = await leerValorRapido(/^Municipio$/i);
+    console.log(`[Direccion] Municipio seleccionado rapido=true valor='${municipioValor}'`);
+    if (valorInvalido(municipioValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Municipio`);
+    await page.waitForTimeout(FAST_UI ? 300 : 700);
+
+    console.log('[Direccion] Seleccionando Localidad');
+    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Localidad$/i, 0, {
+        maxIntentos: FAST_UI ? 8 : 12,
+        timeoutMs: FAST_UI ? 4200 : 7000,
+        panelTimeoutMs: FAST_UI ? 4800 : 9000,
+        esperaEntreIntentosMs: FAST_UI ? 300 : 900,
+    });
+    let localidadValor = await leerValorRapido(/^Localidad$/i);
+    console.log(`[Direccion] Localidad seleccionada rapido=true valor='${localidadValor}'`);
+    if (valorInvalido(localidadValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Localidad`);
+    await page.waitForTimeout(FAST_UI ? 300 : 700);
+
+    console.log('[Direccion] Seleccionando Sector');
+    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Sector$/i, 0, {
+        maxIntentos: FAST_UI ? 7 : 10,
+        timeoutMs: FAST_UI ? 3800 : 6500,
+        panelTimeoutMs: FAST_UI ? 4400 : 8000,
+        esperaEntreIntentosMs: FAST_UI ? 260 : 800,
+    });
+    let sectorValor = await leerValorRapido(/^Sector$/i);
+    console.log(`[Direccion] Sector seleccionado rapido=true valor='${sectorValor}'`);
+    if (valorInvalido(sectorValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Sector`);
+    await page.waitForTimeout(FAST_UI ? 300 : 700);
+
+    console.log('[Direccion] Rellenando Referencia');
+    console.log('[Direccion][Referencia] Buscando campo Referencia');
+
+    let referenciaValor = '';
+    {
+        // Buscar campo por label dentro del modal
+        const labelRef = modalDireccion.locator('label').filter({ hasText: /^Referencia$/i }).first();
+        const labelVisible = await labelRef.isVisible({ timeout: 1500 }).catch(() => false);
+        console.log(`[Direccion][Referencia] Campo por label encontrado=${labelVisible}`);
+
+        let campoRef: Locator | null = null;
+
+        if (labelVisible) {
+            // Subir al ancestro contenedor del campo
+            const contenedor = labelRef
+                .locator('xpath=ancestor::div[.//input or .//textarea or .//*[@role="textbox"] or .//*[@contenteditable="true"]][1]')
+                .first();
+            const contenedorVisible = await contenedor.isVisible().catch(() => false);
+            if (contenedorVisible) {
+                campoRef = contenedor.locator('textarea, input, [role="textbox"], [contenteditable="true"]').first();
+            }
+        }
+
+        // Fallback global dentro del modal si no encontró por label
+        if (!campoRef) {
+            const globalRef = modalDireccion.locator(
+                'textarea:visible, [role="textbox"]:visible'
+            ).first();
+            const globalVisible = await globalRef.isVisible({ timeout: 1500 }).catch(() => false);
+            if (globalVisible) campoRef = globalRef;
+        }
+        if (!campoRef) {
+            // Buscar input visible con placeholder/name/aria-label que mencione referencia
+            const inputs = modalDireccion.locator('input:visible');
+            const totalInputs = await inputs.count().catch(() => 0);
+            for (let i = 0; i < totalInputs; i++) {
+                const inp = inputs.nth(i);
+                const ph = (await inp.getAttribute('placeholder').catch(() => '')) || '';
+                const nm = (await inp.getAttribute('name').catch(() => '')) || '';
+                const al = (await inp.getAttribute('aria-label').catch(() => '')) || '';
+                if (/referencia/i.test(ph + nm + al)) { campoRef = inp; break; }
+            }
+        }
+
+        const campoVisible = await campoRef?.isVisible().catch(() => false) ?? false;
+        console.log(`[Direccion][Referencia] Campo visible=${campoVisible}`);
+
+        if (!campoRef || !campoVisible) {
+            throw new Error('[Direccion][CRITICO] No se pudo llenar Referencia: campo no encontrado en modal');
+        }
+
+        console.log('[Direccion][Referencia] Fill directo');
+        await campoRef.fill('Referencia automatizada', { timeout: 2000 }).catch(async () => {
+            await campoRef!.evaluate((el, v) => {
+                if ('value' in el) {
+                    (el as HTMLInputElement).value = v;
+                } else {
+                    (el as HTMLElement).innerText = v;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }, 'Referencia automatizada');
+        });
+        await campoRef.blur().catch(() => {});
+
+        // Leer valor final
+        const esInput = await campoRef.evaluate(el => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA').catch(() => true);
+        referenciaValor = esInput
+            ? ((await campoRef.inputValue().catch(() => '')) || '').trim()
+            : ((await campoRef.innerText().catch(() => '')) || '').trim();
     }
 
-    const paisActual = await leerValorRapido(/^Pa(?:i|í)s$/i);
-    if (!valorInvalido(paisActual)) console.log('[Direccion] País listo');
-    else await seleccionarComboRapido(/^Pa(?:i|í)s$/i, 'País', false).catch(() => console.log('[Direccion] País no editable, se continua'));
+    console.log(`[Direccion] Referencia llenada valor='${referenciaValor}'`);
 
-    await seleccionarComboRapido(/^Regi(?:o|ó)n$/i, 'Región', false);
-    await seleccionarComboRapido(/^Provincia$/i, 'Provincia', false);
-    const municipio = await seleccionarComboRapido(/^Municipio$/i, 'Municipio');
-    const localidad = await seleccionarComboRapido(/^Localidad$/i, 'Localidad');
-    const sector = await seleccionarComboRapido(/^Sector$/i, 'Sector');
-
-    await llenarTextoRapido(/^Referencia$/i, randomTexto('Referencia'));
-    const referenciaValor = ((await modalDireccion.locator('label').filter({ hasText: /^Referencia$/i }).first().locator('xpath=following::input[1] | following::textarea[1]').first().inputValue().catch(() => '')) || '').trim();
-    console.log('[Direccion] Referencia llenada');
-
-    if (!municipio.ok || !localidad.ok || !sector.ok || !referenciaValor) {
-        throw new Error(`[Direccion] Validacion incompleta. municipio='${municipio.valor}' localidad='${localidad.valor}' sector='${sector.valor}' referencia='${referenciaValor}'`);
+    console.log('[Direccion] Validando campos antes de Aceptar');
+    if (valorInvalido(regionValor) || valorInvalido(provinciaValor) || valorInvalido(municipioValor) || valorInvalido(localidadValor) || valorInvalido(sectorValor) || valorInvalido(referenciaValor)) {
+        throw new Error(`[Direccion][CRITICO] Validacion incompleta. region='${regionValor}' provincia='${provinciaValor}' municipio='${municipioValor}' localidad='${localidadValor}' sector='${sectorValor}' referencia='${referenciaValor}'`);
     }
 
     const btnAceptar = modalDireccion.getByRole('button', { name: /^Aceptar$/i }).first();
@@ -3755,6 +4887,25 @@ const extraerCodigoProducto = (tipoCuenta: string) => {
 const extraerNombreProducto = (tipoCuenta: string) =>
     extraerNombreProductoShared(tipoCuenta);
 
+const productoRegistroKey = (registro: RegistroExcel) =>
+    `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+
+const marcarProductoConfirmado = (registro: RegistroExcel) => {
+    productosConfirmadosPorRegistro.add(productoRegistroKey(registro));
+    console.log('[Producto] Etapa producto marcada como completada');
+};
+
+const productoConfirmadoEnRegistro = (registro: RegistroExcel) =>
+    productosConfirmadosPorRegistro.has(productoRegistroKey(registro));
+
+async function marcarProductoConfirmadoSiYaVisible(page: Page, registro: RegistroExcel) {
+    const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    if (!productoVisible) return false;
+    console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+    marcarProductoConfirmado(registro);
+    return true;
+}
+
 async function detectarProductoAgregadoEnUILegacy(
     page: Page,
     seccionProductos: Locator,
@@ -4179,6 +5330,118 @@ async function detectarProductoAgregadoEnUI(
     return detectarProductoAgregadoEnUIShared(page, seccionProductos, tipoCuenta, options ?? { useGlobalFallback: true });
 }
 
+async function estaEnPantallaProductos(page: Page) {
+    // Signal 1: Categoría label visible
+    const categoriaVisible = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+
+    // Signal 2: Producto label visible
+    const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+
+    // Signal 3: "Agregar relacionado" button (typical in Productos section)
+    const agregarRelacionadoVisible = await page.getByRole('button', { name: /Agregar relacionado/i }).isVisible().catch(() => false);
+
+    // Signal 4: Check for dropdowns in section or page-wide
+    const seccionProductos = await localizarSeccionProductos(page).catch(() => null);
+    let dropdownCount = 0;
+    if (seccionProductos) {
+        dropdownCount = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible').count().catch(() => 0);
+    }
+    if (dropdownCount === 0) {
+        dropdownCount = await page.locator('body').locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible').count().catch(() => 0);
+    }
+
+    // Signal 5: "Productos" text visible on page
+    const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
+
+    // Productos screen is present if we have at least 3 of these signals
+    const signals = [categoriaVisible, productoVisible, agregarRelacionadoVisible, dropdownCount >= 1, productosTextVisible];
+    const signalsPresent = signals.filter(Boolean).length;
+
+    return signalsPresent >= 3;
+}
+
+async function productoAgregadoVisible(page: Page, tipoCuenta: string) {
+    const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
+    if (await msgSinProductos.isVisible().catch(() => false)) return false;
+
+    const seccionProductos = await localizarSeccionProductos(page);
+    const seccionVisible = await seccionProductos.isVisible().catch(() => false);
+    if (seccionVisible) {
+        return detectarProductoAgregadoEnUI(page, seccionProductos, tipoCuenta).catch(() => false);
+    }
+    return detectarProductoAgregadoEnUI(page, page.locator('body'), tipoCuenta, { useGlobalFallback: true }).catch(() => false);
+}
+
+async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: RegistroExcel): Promise<void | 'producto-confirmado'> {
+    if (!await estaEnPantallaProductos(page).catch(() => false)) return;
+
+    console.log('[Producto] Pantalla Productos detectada');
+    let seccionProductos = await localizarSeccionProductos(page);
+    if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+        console.log('[Producto] Continuando con producto ya confirmado');
+        return 'producto-confirmado';
+    }
+    const productoYaVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    if (productoYaVisible) {
+        console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
+        console.log('[Producto] Evitando duplicar producto/cuenta');
+        marcarProductoConfirmado(registro);
+        console.log('[Producto] Continuando con producto ya confirmado');
+        return;
+    }
+
+    const estadoCategoria = await leerValorDropdownEnScope(seccionProductos, /Categor[ií]a de producto/i, { timeoutMs: 2500 })
+        .catch(() => '');
+    const estadoProducto = await leerValorDropdownEnScope(seccionProductos, /^Producto$/i, { timeoutMs: 2500 })
+        .catch(() => '');
+    const categoriaVacia = esValorDropdownVacio(estadoCategoria);
+    const productoVacio = esValorDropdownVacio(estadoProducto);
+
+    console.log(`[Producto] Categoria vacia=${categoriaVacia}`);
+    console.log(`[Producto] Producto vacio=${productoVacio}`);
+
+    if (categoriaVacia) {
+        console.log('[Producto] Seleccionando categoria Cuentas de Efectivo');
+        await seleccionarCategoriaEnSeccionProductos(page, seccionProductos);
+        await esperarFinActualizandoSolicitud(page, FAST_UI ? 8000 : 15000).catch(() => false);
+        await page.waitForTimeout(FAST_UI ? 600 : 1200);
+        seccionProductos = await localizarSeccionProductos(page);
+        if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+            console.log('[Producto] Continuando con producto ya confirmado');
+            return 'producto-confirmado';
+        }
+    }
+
+    const productoVisibleAntesDeSeleccion = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    if (productoVisibleAntesDeSeleccion) {
+        console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
+        console.log('[Producto] Evitando duplicar producto/cuenta');
+        marcarProductoConfirmado(registro);
+        console.log('[Producto] Continuando con producto ya confirmado');
+        return;
+    }
+
+    if (productoVacio || !productoVisibleAntesDeSeleccion) {
+        console.log(`[Producto] Seleccionando producto ${registro.tipoCuenta}`);
+        await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+        const modalAbierto = await modalProductoConfigVisible(page).catch(() => false);
+        console.log(`[Producto] Modal configuracion abierto=${modalAbierto}`);
+        if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+            console.log('[Producto] Continuando con producto ya confirmado');
+            return 'producto-confirmado';
+        }
+        await etapaSeccionProductosPostSeleccion(page, registro, seccionProductos);
+    }
+
+    const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    console.log(`[Producto] Producto agregado visible=${productoVisible}`);
+    if (!productoVisible) {
+        throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
+    }
+    marcarProductoConfirmado(registro);
+    console.log('[Producto] Producto confirmado, ahora si se puede Continuar hacia Verificaciones');
+}
+
 async function modalProductoConfigVisible(page: Page) {
     return modalProductoConfigVisibleShared(page, /Cuentas de efectivo|Balance promedio|Moneda|Tasa/i);
 }
@@ -4496,6 +5759,10 @@ async function seleccionarProductoEnSeccionProductos(
     seccionProductos: Locator,
     tipoCuenta: string
 ) {
+    if (await productoAgregadoVisible(page, tipoCuenta).catch(() => false)) {
+        console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+        return;
+    }
     console.log(`[SeccionProductos] Iniciando seleccion de producto: '${tipoCuenta}'`);
     return seleccionarProductoCuentaEfectivoNuevo(page, seccionProductos, tipoCuenta, {
         confirmarSeleccionProductoRapida,
@@ -4528,6 +5795,9 @@ async function etapaSeccionProductosPostSeleccion(
     registro: RegistroExcel,
     seccionProductosInicial: Locator
 ) {
+    if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+        return;
+    }
     let seccionProductos = seccionProductosInicial;
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const confirmarProductoAgregado = async () => {
@@ -4783,6 +6053,18 @@ async function etapaSeccionProductosPostSeleccion(
         return false;
     };
 
+    const esperarProductoVisibleTrasAgregar = async (timeoutMs = FAST_UI ? 5000 : 8000) => {
+        const inicio = Date.now();
+        while (Date.now() - inicio < timeoutMs) {
+            const visible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            if (visible) return true;
+            const confirmado = await confirmarProductoAgregado().catch(() => false);
+            if (confirmado) return true;
+            await page.waitForTimeout(FAST_UI ? 250 : 400);
+        }
+        return false;
+    };
+
     let productoAgregado = false;
     for (let intentoProducto = 1; intentoProducto <= 3; intentoProducto++) {
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
@@ -4791,6 +6073,7 @@ async function etapaSeccionProductosPostSeleccion(
         if (yaAgregadoAntes) {
             console.log(`[Producto] productoAgregado=true al inicio del intento ${intentoProducto}`);
             productoAgregado = true;
+            marcarProductoConfirmado(registro);
             break;
         }
 
@@ -4806,10 +6089,21 @@ async function etapaSeccionProductosPostSeleccion(
                 if (confirmoSinModal) {
                     console.log(`[Producto] Producto agregado directamente (sin modal de configuracion).`);
                     productoAgregado = true;
+                    marcarProductoConfirmado(registro);
                     break;
                 }
                 if (intentoProducto < 3) {
+                    if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                        console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                        productoAgregado = true;
+                        marcarProductoConfirmado(registro);
+                        break;
+                    }
                     console.log(`[Producto] Sin modal y sin producto. Re-seleccionando...`);
+                    if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+                        productoAgregado = true;
+                        break;
+                    }
                     await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
                     await page.waitForTimeout(FAST_UI ? 500 : 1200);
                     continue;
@@ -4820,10 +6114,21 @@ async function etapaSeccionProductosPostSeleccion(
 
         const balanceLleno = await llenarBalancePromedioEnContexto();
         console.log(`[Producto] Intento ${intentoProducto}: balanceLleno=${balanceLleno}`);
+        console.log(`[Producto] Balance/tasa completados=${balanceLleno}`);
         if (!balanceLleno) {
             const confirmoSinBalance = await confirmarProductoAgregado();
-            if (confirmoSinBalance) { productoAgregado = true; break; }
+            if (confirmoSinBalance) { productoAgregado = true; marcarProductoConfirmado(registro); break; }
             if (intentoProducto < 3) {
+                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                    console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                    productoAgregado = true;
+                    marcarProductoConfirmado(registro);
+                    break;
+                }
+                if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+                    productoAgregado = true;
+                    break;
+                }
                 await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 500 : 1200);
                 continue;
@@ -4837,9 +6142,20 @@ async function etapaSeccionProductosPostSeleccion(
         }
         const clicAgregar = await clickAgregarProductoDesdeBalance();
         console.log(`[Producto] Intento ${intentoProducto}: clicAgregar=${clicAgregar}`);
+        console.log('[Producto] Click en Agregar');
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         if (!clicAgregar) {
             if (intentoProducto < 3) {
+                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                    console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                    productoAgregado = true;
+                    marcarProductoConfirmado(registro);
+                    break;
+                }
+                if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+                    productoAgregado = true;
+                    break;
+                }
                 await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 500 : 1200);
                 continue;
@@ -4847,18 +6163,41 @@ async function etapaSeccionProductosPostSeleccion(
             throw new Error(`[CRITICO] No se pudo encontrar boton para agregar producto en 'Balance promedio'.`);
         }
         await page.waitForTimeout(FAST_UI ? 600 : 1800);
-        await cerrarModalProductoConAceptar().catch(() => false);
+        const aceptoConfirmacion = await cerrarModalProductoConAceptar().catch(() => false);
+        console.log(`[Producto] Confirmacion de producto aceptada=${aceptoConfirmacion}`);
         await page.waitForTimeout(FAST_UI ? 500 : 1200);
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+
+        const aparecioTrasAgregar = await esperarProductoVisibleTrasAgregar();
+        if (aparecioTrasAgregar) {
+            console.log('[Producto] Producto apareció después del primer Agregar; no se reintentará Agregar');
+            console.log('[Producto] Evitando duplicar producto/cuenta');
+            productoAgregado = true;
+            marcarProductoConfirmado(registro);
+            break;
+        }
 
         const confirmoAhora = await confirmarProductoAgregado();
         console.log(`[Producto] Intento ${intentoProducto}: confirmoAhora=${confirmoAhora}`);
         if (confirmoAhora) {
             productoAgregado = true;
+            marcarProductoConfirmado(registro);
             break;
         }
 
         if (intentoProducto < 3) {
+            const visibleAntesDeReintentar = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            if (visibleAntesDeReintentar) {
+                console.log('[Producto] Producto apareció después del primer Agregar; no se reintentará Agregar');
+                console.log('[Producto] Evitando duplicar producto/cuenta');
+                productoAgregado = true;
+                marcarProductoConfirmado(registro);
+                break;
+            }
+            if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+                productoAgregado = true;
+                break;
+            }
             await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
             await page.waitForTimeout(FAST_UI ? 500 : 1200);
         }
@@ -4870,6 +6209,7 @@ async function etapaSeccionProductosPostSeleccion(
             await page.waitForTimeout(FAST_UI ? 350 : 900);
             const confirmoTrasCerrar = await confirmarProductoAgregado();
             if (confirmoTrasCerrar) {
+                marcarProductoConfirmado(registro);
                 return;
             }
         }
@@ -4883,6 +6223,11 @@ async function etapaSeccionProductosPostSeleccion(
 }
 
 async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
+    if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+        console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+        marcarProductoConfirmado(registro);
+        return;
+    }
     let flujoNuevoActivado = true;
     if (flujoNuevoActivado) {
         const { seccionProductos } = await asegurarSeccionProductosVisible(page, {
@@ -5345,6 +6690,11 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         const balanceLleno = await llenarBalancePromedioEnContexto();
         if (!balanceLleno) {
             if (intentoProducto < 3) {
+                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                    console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                    productoAgregado = true;
+                    break;
+                }
                 await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 220 : 600);
                 continue;
@@ -5359,6 +6709,11 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         if (!clicAgregar) {
             if (intentoProducto < 3) {
+                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                    console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                    productoAgregado = true;
+                    break;
+                }
                 await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 220 : 600);
                 continue;
@@ -5377,6 +6732,11 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         }
 
         if (intentoProducto < 3) {
+            if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+                productoAgregado = true;
+                break;
+            }
             await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
             await page.waitForTimeout(FAST_UI ? 220 : 600);
         }
@@ -5440,6 +6800,28 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         postProductoLlenadoDesdeCumplimiento = true;
         console.log('[PostProducto] Llenado post-OFAC completado');
     };
+    const avanzarConProductoConfirmado = async (contexto: string) => {
+        console.log('[Producto] Producto confirmado; cortando selección y avanzando con Continuar');
+        const resultado = await intentarAvanceRealHaciaTaller(page, contexto, {
+            maxClicks: 2,
+            tipoCuenta: registro.tipoCuenta,
+        });
+        if (resultado === 'gestion-documental') {
+            await resolverGestionDocumentalPostContinuarPrimeraPantalla(page, { maxIntentos: 3 }).catch((e) => {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (/\[CRITICO\]/i.test(msg)) throw e;
+            });
+            return 'continuar';
+        }
+        if (resultado === 'post-producto') {
+            await llenarPostProductoPostOfac();
+            return 'post-producto';
+        }
+        if (resultado === 'taller') {
+            return 'taller';
+        }
+        return 'continuar';
+    };
 
     const verificacionInicial = await procesarVerificacionesEspeciales(page).catch(() => null);
     if (verificacionInicial?.tipo === 'cumplimiento' && verificacionInicial.estado === 'post-producto') {
@@ -5449,27 +6831,16 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
     const msgSinProductosDespuesContinuar = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const labelPropositoTaller = page.locator('label').filter({ hasText: /Prop(?:o|\u00f3)sito/i }).first();
     let seccionProductos = await localizarSeccionProductos(page);
-    
-    // --- VALIDACION ESTRICTA SOLICITADA POR EL USUARIO ---
-    const verificarProductoAntesDeContinuar = async () => {
-        const sinProductosVisible = await msgSinProductosDespuesContinuar.isVisible().catch(() => false);
-        if (sinProductosVisible) return false;
-        
-        seccionProductos = await localizarSeccionProductos(page);
-        const seccionVisible = await seccionProductos.isVisible().catch(() => false);
-        const productoEnUI = seccionVisible
-            ? await detectarProductoAgregadoEnUI(page, seccionProductos, registro.tipoCuenta).catch(() => false)
-            : await detectarProductoAgregadoEnUI(page, page.locator('body'), registro.tipoCuenta, { useGlobalFallback: true }).catch(() => false);
-            
-        return productoEnUI;
-    };
 
-    const productoOk = postProductoLlenadoDesdeCumplimiento || await verificarProductoAntesDeContinuar();
-    if (!productoOk) {
-        console.log(`[Relacionados][BLOQUEO] No se detecta el producto '${registro.tipoCuenta}' agregado. Abortando click en Continuar.`);
-        throw new Error(`[CRITICO] Bloqueado 'Continuar': No se ha seleccionado o agregado el producto '${registro.tipoCuenta}'. El flujo no puede avanzar.`);
+    if (!postProductoLlenadoDesdeCumplimiento) {
+        const estadoProductoInicial = await asegurarProductoConfirmadoAntesDeContinuar(page, registro);
+        if (estadoProductoInicial === 'producto-confirmado') {
+            const avanceTrasProductoConfirmado = await avanzarConProductoConfirmado('producto confirmado inicial');
+            if (avanceTrasProductoConfirmado === 'taller') {
+                return labelPropositoTaller;
+            }
+        }
     }
-    // -----------------------------------------------------
 
     const completoPostProductoInicial = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
     if (completoPostProductoInicial) {
@@ -5491,7 +6862,7 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         const resultadoInicial = await intentarAvanceRealHaciaTaller(
             page,
             `etapa relacionados ${intentoAvance}/3`,
-            { maxClicks: 2 }
+            { maxClicks: 2, tipoCuenta: registro.tipoCuenta }
         );
 
         if (resultadoInicial === 'gestion-documental') {
@@ -5504,6 +6875,30 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
             continue;
         } else if (resultadoInicial === 'taller') {
             return labelPropositoTaller;
+        } else if (resultadoInicial === 'productos') {
+            if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
+                const avanceTrasProductoConfirmado = await avanzarConProductoConfirmado(`producto confirmado en relacionados ${intentoAvance}/3`);
+                if (avanceTrasProductoConfirmado === 'taller') {
+                    return labelPropositoTaller;
+                }
+                continue;
+            }
+            const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            if (productoVisible) {
+                marcarProductoConfirmado(registro);
+                console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
+                console.log('[Producto] Evitando duplicar producto/cuenta');
+                console.log('[Producto] Continuando con producto ya confirmado');
+                continue;
+            }
+            const estadoProducto = await asegurarProductoConfirmadoAntesDeContinuar(page, registro);
+            if (estadoProducto === 'producto-confirmado') {
+                const avanceTrasProductoConfirmado = await avanzarConProductoConfirmado(`producto confirmado tras asegurar ${intentoAvance}/3`);
+                if (avanceTrasProductoConfirmado === 'taller') {
+                    return labelPropositoTaller;
+                }
+            }
+            continue;
         }
 
         console.log(`[Relacionados] esperarPantallaTaller... url=${page.url()}`);

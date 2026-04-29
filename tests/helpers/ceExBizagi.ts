@@ -2332,6 +2332,284 @@ async function clickSiguienteCumplimiento(bizagiPage: Page) {
   console.log("[Cumplimiento][Bizagi] Click en Siguiente");
 }
 
+async function descartarOfacMarcadoEnDom(bizagiPage: Page): Promise<boolean> {
+  return bizagiPage.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+    for (const input of inputs) {
+      const value = `${input.value ?? ''}`.trim();
+      const id = `${input.id ?? ''}`.trim();
+      if (value !== '2' && !/sidp?_accofac-2/i.test(id)) continue;
+      const label = input.id
+        ? document.querySelector(`label[for="${input.id}"]`)
+        : input.closest('label, span, div')?.querySelector('label');
+      const labelText = `${label?.textContent ?? ''}`.replace(/\s+/g, ' ').trim();
+      const className = `${input.className ?? ''} ${label instanceof HTMLElement ? label.className ?? '' : ''}`;
+      if (!/descartar/i.test(labelText) && !/sidp?_accofac-2/i.test(id)) continue;
+      if (input.checked || /checked|ui-radio-state-checked/i.test(className)) return true;
+    }
+    return false;
+  }).catch(() => false);
+}
+
+async function seleccionarAccionOfacDescartarYEsperarMotivos(
+  bizagiPage: Page
+): Promise<{ accionDescartar: boolean; motivosDisponibles: boolean }> {
+  console.log('[OFAC] Preparando carga de motivos: Confirmar -> Descartar');
+
+  const labelConfirmar = bizagiPage.locator('label').filter({ hasText: /^Confirmar$/i }).first();
+  const confirmarExiste = await labelConfirmar.isVisible().catch(() => false);
+  if (confirmarExiste) {
+    console.log('[OFAC] Click real en Confirmar para refrescar dependencias');
+    await labelConfirmar.click({ force: true }).catch(() => {});
+    await labelConfirmar.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"]') as HTMLInputElement | null;
+      const fireMouse = (el: HTMLElement | null) => {
+        if (!el) return;
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      };
+      fireMouse(lbl);
+      fireMouse(input);
+      if (input) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+    }).catch(() => {});
+    await bizagiPage.waitForTimeout(300);
+  } else {
+    console.log('[OFAC] Confirmar no visible; se continúa directo con Descartar');
+  }
+
+  console.log('[OFAC] Click real en Descartar');
+  let accionDescartar = await descartarOfacMarcadoEnDom(bizagiPage);
+  let subintentosDescartar = 0;
+
+  while (!accionDescartar && subintentosDescartar < 2) {
+    subintentosDescartar++;
+
+    let labelDescartar = bizagiPage
+      .locator('xpath=//label[contains(@for,"sidP_AccOFAC-2") and normalize-space()="Descartar"]')
+      .first();
+    if (!(await labelDescartar.isVisible().catch(() => false))) {
+      labelDescartar = bizagiPage
+        .locator('xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/following-sibling::label[normalize-space()="Descartar"] | //input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/../label[normalize-space()="Descartar"])[1]')
+        .first();
+    }
+    if (!(await labelDescartar.isVisible().catch(() => false))) {
+      labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+    }
+
+    await labelDescartar.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
+    await labelDescartar.click({ force: true }).catch(() => {});
+
+    const inputDescartar = await labelDescartar.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      return (lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor)
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]')) as HTMLInputElement | null;
+    }).catch(() => null);
+
+    if (inputDescartar) {
+      await labelDescartar.evaluate((label) => {
+        const lbl = label as HTMLLabelElement;
+        const input = lbl.htmlFor
+          ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+          : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+        const fireMouse = (el: HTMLElement | null) => {
+          if (!el) return;
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        };
+        fireMouse(lbl);
+        fireMouse(input);
+        if (input) {
+          input.checked = true;
+          input.setAttribute('checked', 'checked');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+      }).catch(() => {});
+    }
+
+    await bizagiPage.waitForTimeout(600);
+
+    accionDescartar = await labelDescartar.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+      const className = `${lbl.className || ''} ${input?.className || ''}`;
+      return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
+    }).catch(() => false);
+  }
+
+  if (!accionDescartar) {
+    accionDescartar = await descartarOfacMarcadoEnDom(bizagiPage);
+  }
+
+  console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
+
+  if (!accionDescartar) {
+    return { accionDescartar: false, motivosDisponibles: false };
+  }
+
+  console.log('[OFAC] Descartar marcado; esperando carga de motivos');
+  console.log('[OFAC] Esperando opciones de motivo para Descartar');
+  const opcionesValidas = await esperarOpcionesMotivoDescartar(bizagiPage);
+  return { accionDescartar: true, motivosDisponibles: opcionesValidas };
+}
+
+async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean> {
+  const comboMotivo = bizagiPage
+    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
+    .first();
+  const triggerMotivo = bizagiPage
+    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::div[contains(@class,"ui-selectmenu-btn") or contains(@class,"ui-selectmenu-button") or contains(@class,"ui-selectmenu-trigger")][1])')
+    .first();
+
+  const startTime = Date.now();
+  const timeout = 8000;
+  const pollMs = 300;
+  let intentoRevalidarDescartar = 0;
+
+  while (Date.now() - startTime < timeout) {
+    await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
+    await comboMotivo.click({ force: true }).catch(() => {});
+    if (await triggerMotivo.isVisible().catch(() => false)) {
+      await triggerMotivo.click({ force: true }).catch(() => {});
+    }
+    await comboMotivo.press('ArrowDown').catch(() => {});
+    await bizagiPage.waitForTimeout(pollMs);
+
+    const opciones = bizagiPage.locator('div.ui-select-dropdown.open li[role="option"], div.ui-select-dropdown.open [role="option"], [role="listbox"] li[role="option"]');
+    const hayOpciones = await opciones.first().isVisible().catch(() => false);
+
+    if (hayOpciones) {
+      let tieneOpcionValida = false;
+      const total = await opciones.count().catch(() => 0);
+      const textosVisibles: string[] = [];
+
+      for (let idx = 0; idx < total; idx++) {
+        const opcion = opciones.nth(idx);
+        if (!(await opcion.isVisible().catch(() => false))) continue;
+        const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+        if (textosVisibles.length < 5) textosVisibles.push(texto);
+
+        if (/coincidencia\s+descartada/i.test(texto) && /no\s+corresponderse/i.test(texto)) {
+          tieneOpcionValida = true;
+        }
+      }
+
+      console.log(`[OFAC][Motivo][Diag] opciones visibles=${JSON.stringify(textosVisibles)}`);
+
+      if (tieneOpcionValida) {
+        console.log(`[OFAC] Opciones motivo detectadas: ${total}`);
+        console.log('[OFAC] Motivos de Descartar disponibles=true');
+        await bizagiPage.keyboard.press('Escape').catch(() => {});
+        await bizagiPage.waitForTimeout(250);
+        return true;
+      }
+    }
+
+    await bizagiPage.keyboard.press('Escape').catch(() => {});
+
+    if (intentoRevalidarDescartar < 2 && Date.now() - startTime < 5000) {
+      const labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+      if (await labelDescartar.isVisible().catch(() => false)) {
+        intentoRevalidarDescartar++;
+        await labelDescartar.click({ force: true }).catch(() => {});
+        await labelDescartar.evaluate((label) => {
+          const lbl = label as HTMLLabelElement;
+          const input = lbl.htmlFor
+            ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+            : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+          if (input) {
+            input.checked = true;
+            input.setAttribute('checked', 'checked');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+          }
+        }).catch(() => {});
+        await bizagiPage.waitForTimeout(600);
+      }
+    } else {
+      await bizagiPage.waitForTimeout(pollMs);
+    }
+  }
+
+  console.log('[OFAC] No se encontraron opciones válidas de descarte después de 8 segundos');
+  return false;
+}
+
+async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<void> {
+  const labelConfirmarDom = bizagiPage
+    .locator('xpath=//label[normalize-space()="Confirmar"]')
+    .first();
+  const confirmarEnDom = await labelConfirmarDom.count().then((n) => n > 0).catch(() => false);
+
+  if (confirmarEnDom) {
+    await labelConfirmarDom.scrollIntoViewIfNeeded().catch(() => {});
+    await labelConfirmarDom.click({ force: true }).catch(() => {});
+    await labelConfirmarDom.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"]') as HTMLInputElement | null;
+      const fireMouse = (el: HTMLElement | null) => {
+        if (!el) return;
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      };
+      fireMouse(lbl);
+      fireMouse(input);
+      if (input) {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+    }).catch(() => {});
+    await bizagiPage.waitForTimeout(500);
+  } else {
+    console.log('[OFAC] Confirmar no existe en DOM; re-disparando Descartar');
+  }
+
+  const labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+  if (await labelDescartar.isVisible().catch(() => false)) {
+    await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
+    await labelDescartar.click({ force: true }).catch(() => {});
+    await labelDescartar.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+      if (input) {
+        input.checked = true;
+        input.setAttribute('checked', 'checked');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+    }).catch(() => {});
+    await bizagiPage.waitForTimeout(1000);
+  }
+
+  const comboMotivo = bizagiPage
+    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
+    .first();
+  await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
+  await comboMotivo.click({ force: true }).catch(() => {});
+}
+
 async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
   const pantalla = bizagiPage
     .locator('body')
@@ -2345,166 +2623,192 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
     if (box) await bizagiPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
   };
 
-  console.log('[OFAC] Seleccionando Acción Coincidencias OFAC: Descartar');
-  let labelDescartar = bizagiPage
-    .locator('xpath=//label[contains(@for,"sidP_AccOFAC-2") and normalize-space()="Descartar"]')
-    .first();
-  if (!(await labelDescartar.isVisible().catch(() => false))) {
-    labelDescartar = bizagiPage
-      .locator('xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/following-sibling::label[normalize-space()="Descartar"] | //input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/../label[normalize-space()="Descartar"])[1]')
-      .first();
-  }
-  if (!(await labelDescartar.isVisible().catch(() => false))) {
-    labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
-  }
-  await labelDescartar.waitFor({ state: 'visible', timeout: 10000 });
-  await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
-  await labelDescartar.click({ force: true }).catch(() => {});
-  await clickCentro(labelDescartar);
-  await labelDescartar.evaluate((label) => {
-    const lbl = label as HTMLLabelElement;
-    const input = lbl.htmlFor
-      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-    const fireMouse = (el: HTMLElement | null) => {
-      if (!el) return;
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    };
-    fireMouse(lbl);
-    fireMouse(input);
-    if (input) {
-      input.checked = true;
-      input.setAttribute('checked', 'checked');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  }).catch(() => {});
-  await bizagiPage.waitForTimeout(400);
-
-  const accionDescartar = await labelDescartar.evaluate((label) => {
-    const lbl = label as HTMLLabelElement;
-    const input = lbl.htmlFor
-      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-    const className = `${lbl.className || ''} ${input?.className || ''}`;
-    return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
-  }).catch(() => false);
-  console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
-  if (!accionDescartar) throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'Descartar' en Acción Coincidencias OFAC.");
-
-  console.log('[OFAC] Seleccionando Motivo Coincidencias OFAC index 1');
-  const comboMotivo = bizagiPage
-    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
-    .first();
-  await comboMotivo.waitFor({ state: 'visible', timeout: 10000 });
-  const comboMotivoHabilitado = await esperarComboBizagiHabilitado(bizagiPage, comboMotivo, 'Motivo Coincidencias OFAC', 8000);
-  if (!comboMotivoHabilitado) {
-    throw new Error("[CRITICO][OFAC] Motivo Coincidencias OFAC sigue deshabilitado despues de seleccionar Descartar.");
-  }
-  const triggerMotivo = bizagiPage
-    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::div[contains(@class,"ui-selectmenu-btn") or contains(@class,"ui-selectmenu-button") or contains(@class,"ui-selectmenu-trigger")][1])')
-    .first();
-
+  let accionDescartar = false;
+  let motivosDisponibles = false;
   let motivoSeleccionado = false;
   let valorMotivo = '';
-  for (let intento = 1; intento <= 4 && !motivoSeleccionado; intento++) {
-    await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
-    await comboMotivo.click({ force: true }).catch(() => {});
-    if (await triggerMotivo.isVisible().catch(() => false)) {
-      await triggerMotivo.click({ force: true }).catch(() => {});
-    }
-    await comboMotivo.press('ArrowDown').catch(() => {});
+  let solicitarAclaracionesNo = false;
 
-    const opciones = bizagiPage.locator('div.ui-select-dropdown.open li[role="option"], div.ui-select-dropdown.open [role="option"], [role="listbox"] li[role="option"]');
-    const hayOpciones = await opciones.first().waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false);
-    if (!hayOpciones) {
-      await bizagiPage.keyboard.press('Escape').catch(() => {});
-      await bizagiPage.waitForTimeout(250);
-      continue;
+  for (let intento = 1; intento <= 3; intento++) {
+    console.log(`[OFAC] Intento interno ${intento}/3`);
+    if (intento > 1) {
+      console.log('[OFAC] Reintentando Descartar en la misma pantalla');
     }
 
-    const opcionesVisibles: Locator[] = [];
-    const total = await opciones.count().catch(() => 0);
-    for (let idx = 0; idx < total; idx++) {
-      const opcion = opciones.nth(idx);
-      if (!(await opcion.isVisible().catch(() => false))) continue;
-      opcionesVisibles.push(opcion);
+    const resultadoDescartar = await seleccionarAccionOfacDescartarYEsperarMotivos(bizagiPage);
+    if (resultadoDescartar.accionDescartar) {
+      accionDescartar = true;
+    }
+    motivosDisponibles = resultadoDescartar.motivosDisponibles;
+    console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
+
+    if (!accionDescartar) {
+      if (intento < 3) continue;
+      throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'Descartar' en Acción Coincidencias OFAC después de 3 intentos.");
     }
 
-    const opcionIndex1 = opcionesVisibles[1];
-    if (opcionIndex1) {
-      await opcionIndex1.click({ force: true }).catch(() => {});
+    if (!motivosDisponibles) {
+      console.log('[OFAC] Descartar sigue marcado=true; motivos no cargaron');
+      await refrescarOfacDescartarConConfirmar(bizagiPage);
+      const reintentoMotivos = await esperarOpcionesMotivoDescartar(bizagiPage);
+      motivosDisponibles = reintentoMotivos;
+      if (!motivosDisponibles) {
+        if (intento < 3) continue;
+        throw new Error('[CRITICO][OFAC] Motivos de Descartar no cargaron después de 3 intentos internos.');
+      }
     }
 
-    await bizagiPage.waitForTimeout(500);
-    valorMotivo = ((await comboMotivo.inputValue().catch(() => '')) || '').trim();
-    if (!valorMotivo) {
-      valorMotivo = ((await comboMotivo.evaluate((el) => {
-        const input = el as HTMLInputElement;
-        return input.value || input.getAttribute('value') || input.getAttribute('title') || input.textContent || '';
-      }).catch(() => '')) || '').trim();
+    if (intento > 1) {
+      console.log('[OFAC] Reintentando Motivo en la misma pantalla');
     }
-    motivoSeleccionado = !!valorMotivo && !/^[-\s]+$/.test(valorMotivo) && !/por favor seleccione|seleccione|please select/i.test(valorMotivo);
-  }
-  console.log(`[OFAC] Motivo Coincidencias OFAC seleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
-  if (!motivoSeleccionado) throw new Error("[CRITICO][OFAC] No se pudo seleccionar index 1 en Motivo Coincidencias OFAC.");
 
-  console.log('[OFAC] Seleccionando Solicitar Aclaraciones: No');
-  const bloqueAclaraciones = bizagiPage
-    .locator('xpath=//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/ancestor::*[self::div or self::section or self::fieldset or self::form][1]')
-    .first();
-  await bloqueAclaraciones.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-  let labelNo = bloqueAclaraciones.locator('label').filter({ hasText: /^No$/i }).first();
-  if (!(await labelNo.isVisible().catch(() => false))) {
-    labelNo = bizagiPage
-      .locator('xpath=(//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/following::label[normalize-space()="No"])[1]')
+    console.log('[OFAC] Seleccionando Motivo Coincidencias OFAC por texto de descarte');
+    const comboMotivo = bizagiPage
+      .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
       .first();
-  }
-  await labelNo.waitFor({ state: 'visible', timeout: 10000 });
-  await labelNo.scrollIntoViewIfNeeded().catch(() => {});
-  await labelNo.click({ force: true }).catch(() => {});
-  await clickCentro(labelNo);
-  await labelNo.evaluate((label) => {
-    const lbl = label as HTMLLabelElement;
-    const input = lbl.htmlFor
-      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
-    const fireMouse = (el: HTMLElement | null) => {
-      if (!el) return;
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    };
-    fireMouse(lbl);
-    fireMouse(input);
-    if (input) {
-      input.checked = true;
-      input.setAttribute('checked', 'checked');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+    await comboMotivo.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    const comboMotivoHabilitado = await esperarComboBizagiHabilitado(bizagiPage, comboMotivo, 'Motivo Coincidencias OFAC', 8000);
+    if (!comboMotivoHabilitado) {
+      if (intento < 3) continue;
+      throw new Error("[CRITICO][OFAC] Motivo Coincidencias OFAC sigue deshabilitado después de 3 intentos.");
     }
-  }).catch(() => {});
-  await bizagiPage.waitForTimeout(300);
-  const solicitarAclaracionesNo = await labelNo.evaluate((label) => {
-    const lbl = label as HTMLLabelElement;
-    const input = lbl.htmlFor
-      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
-    const className = `${lbl.className || ''} ${input?.className || ''}`;
-    return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
-  }).catch(() => false);
-  console.log(`[OFAC] Solicitar Aclaraciones No marcado=${solicitarAclaracionesNo}`);
-  if (!solicitarAclaracionesNo) throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'No' en Solicitar Aclaraciones.");
+    const triggerMotivo = bizagiPage
+      .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::div[contains(@class,"ui-selectmenu-btn") or contains(@class,"ui-selectmenu-button") or contains(@class,"ui-selectmenu-trigger")][1])')
+      .first();
+
+    motivoSeleccionado = false;
+    valorMotivo = '';
+    for (let intentoMotivo = 1; intentoMotivo <= 4 && !motivoSeleccionado; intentoMotivo++) {
+      await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
+      await comboMotivo.click({ force: true }).catch(() => {});
+      if (await triggerMotivo.isVisible().catch(() => false)) {
+        await triggerMotivo.click({ force: true }).catch(() => {});
+      }
+      await comboMotivo.press('ArrowDown').catch(() => {});
+
+      const opciones = bizagiPage.locator('div.ui-select-dropdown.open li[role="option"], div.ui-select-dropdown.open [role="option"], [role="listbox"] li[role="option"]');
+      const hayOpciones = await opciones.first().waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false);
+      if (!hayOpciones) {
+        await bizagiPage.keyboard.press('Escape').catch(() => {});
+        await bizagiPage.waitForTimeout(250);
+        continue;
+      }
+
+      const opcionesVisibles: Locator[] = [];
+      const total = await opciones.count().catch(() => 0);
+      for (let idx = 0; idx < total; idx++) {
+        const opcion = opciones.nth(idx);
+        if (!(await opcion.isVisible().catch(() => false))) continue;
+        opcionesVisibles.push(opcion);
+      }
+
+      let opcionAClickear: Locator | null = null;
+
+      for (const opcion of opcionesVisibles) {
+        const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+        if (/coincidencia\s+descartada/i.test(texto) && /no\s+corresponderse/i.test(texto)) {
+          opcionAClickear = opcion;
+          break;
+        }
+      }
+
+      if (!opcionAClickear && opcionesVisibles.length > 0) {
+        for (const opcion of opcionesVisibles) {
+          const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+          if (!/por favor seleccione|seleccione|please select|^[-\s]+$/i.test(texto) && !/individuo\s+en\s+listas/i.test(texto)) {
+            opcionAClickear = opcion;
+            break;
+          }
+        }
+      }
+
+      if (opcionAClickear) {
+        await opcionAClickear.click({ force: true }).catch(() => {});
+      }
+
+      await bizagiPage.waitForTimeout(500);
+      valorMotivo = ((await comboMotivo.inputValue().catch(() => '')) || '').trim();
+      if (!valorMotivo) {
+        valorMotivo = ((await comboMotivo.evaluate((el) => {
+          const input = el as HTMLInputElement;
+          return input.value || input.getAttribute('value') || input.getAttribute('title') || input.textContent || '';
+        }).catch(() => '')) || '').trim();
+      }
+
+      const esInvalidoIndividuoListas = /individuo\s+en\s+listas\s+de\s+control\s+internacionales/i.test(valorMotivo);
+      const esValido = !!valorMotivo && !/^[-\s]+$/.test(valorMotivo) && !/por favor seleccione|seleccione|please select/i.test(valorMotivo) && !esInvalidoIndividuoListas;
+      motivoSeleccionado = esValido;
+    }
+    console.log(`[OFAC] Motivo Coincidencias OFAC seleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
+
+    if (!motivoSeleccionado) {
+      if (intento < 3) continue;
+      throw new Error(`[CRITICO][OFAC] No se pudo seleccionar Motivo Coincidencias OFAC válido después de 3 intentos. Valor final: '${valorMotivo}'`);
+    }
+
+    if (intento > 1) {
+      console.log('[OFAC] Reintentando Solicitar Aclaraciones No en la misma pantalla');
+    }
+
+    console.log('[OFAC] Seleccionando Solicitar Aclaraciones: No');
+    const bloqueAclaraciones = bizagiPage
+      .locator('xpath=//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/ancestor::*[self::div or self::section or self::fieldset or self::form][1]')
+      .first();
+    await bloqueAclaraciones.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    let labelNo = bloqueAclaraciones.locator('label').filter({ hasText: /^No$/i }).first();
+    if (!(await labelNo.isVisible().catch(() => false))) {
+      labelNo = bizagiPage
+        .locator('xpath=(//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/following::label[normalize-space()="No"])[1]')
+        .first();
+    }
+    await labelNo.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    await labelNo.scrollIntoViewIfNeeded().catch(() => {});
+    await labelNo.click({ force: true }).catch(() => {});
+    await clickCentro(labelNo);
+    await labelNo.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+      const fireMouse = (el: HTMLElement | null) => {
+        if (!el) return;
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      };
+      fireMouse(lbl);
+      fireMouse(input);
+      if (input) {
+        input.checked = true;
+        input.setAttribute('checked', 'checked');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }).catch(() => {});
+    await bizagiPage.waitForTimeout(300);
+    solicitarAclaracionesNo = await labelNo.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+      const className = `${lbl.className || ''} ${input?.className || ''}`;
+      return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
+    }).catch(() => false);
+    console.log(`[OFAC] Solicitar Aclaraciones No marcado=${solicitarAclaracionesNo}`);
+
+    if (!solicitarAclaracionesNo) {
+      if (intento < 3) continue;
+      throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'No' en Solicitar Aclaraciones después de 3 intentos.");
+    }
+
+    if (accionDescartar && motivoSeleccionado && solicitarAclaracionesNo) {
+      break;
+    }
+  }
 
   console.log(`[OFAC] accionDescartar=${accionDescartar}`);
   console.log(`[OFAC] motivoSeleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
   console.log(`[OFAC] solicitarAclaracionesNo=${solicitarAclaracionesNo}`);
-
-  if (!accionDescartar || !motivoSeleccionado || !solicitarAclaracionesNo) {
-    throw new Error('[CRITICO][OFAC] No se puede continuar porque una validacion OFAC fallo.');
-  }
 
   const btnSiguiente = bizagiPage.getByRole('button', { name: /Siguiente/i }).first();
   await btnSiguiente.waitFor({ state: 'visible', timeout: 15000 });
@@ -2828,16 +3132,109 @@ export async function abrirSolicitudCumplimientoEnBizagiDesdePortal(
   const bizagiUsuario = opts.usuario ?? process.env.BIZAGI_USER ?? 'domain\\admon';
   const bizagiPassword = opts.password ?? process.env.BIZAGI_PASS;
 
-  const bizagiPage = await portalPage.context().newPage();
-  await bizagiPage.goto(bizagiUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
-  await entrarABizagiSiHayLoginRobusto(bizagiPage, bizagiUsuario, bizagiPassword);
-  // Priorizar el flujo de Admin si el buscador global suele fallar
-  const casoEncontrado = await buscarCasoPorMpnEnBizagi(bizagiPage, mpn, { useAdminFallback: true, openIfFound: true });
-  if (!casoEncontrado) {
-    throw new Error(`[CRITICO] No se encontro ninguna fila en Bizagi para '${mpn}'.`);
+  let bizagiPage: Page | null = null;
+  const paginasExistentes = portalPage.context().pages();
+  const paginasBizagi: Array<{ page: Page; tieneGestionar: boolean; tieneMpn: boolean; tieneMenu: boolean }> = [];
+
+  for (const candidata of paginasExistentes) {
+    if (candidata === portalPage) continue;
+    const url = candidata.url();
+    if (!url.includes('bizagi.com')) continue;
+
+    const tieneGestionar = await candidata
+      .getByText(/Gestionar\s+Coincidencias/i)
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const tieneMpn = await candidata
+      .locator('span.p-tag-value')
+      .filter({ hasText: /^MPN-\d+$/i })
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const tieneMenu = await candidata.locator('#menuQuery').isVisible().catch(() => false);
+
+    paginasBizagi.push({ page: candidata, tieneGestionar, tieneMpn, tieneMenu });
   }
-  await abrirSolicitudCumplimientoBizagiRapido(bizagiPage, mpn);
-  await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+
+  if (paginasBizagi.length > 0) {
+    console.log(`[Bizagi] Pestañas Bizagi detectadas=${paginasBizagi.length}`);
+    const porPrioridad = paginasBizagi.sort((a, b) => {
+      const scoreA = (a.tieneGestionar ? 3 : 0) + (a.tieneMpn ? 2 : 0) + (a.tieneMenu ? 1 : 0);
+      const scoreB = (b.tieneGestionar ? 3 : 0) + (b.tieneMpn ? 2 : 0) + (b.tieneMenu ? 1 : 0);
+      return scoreB - scoreA;
+    });
+    const mejorPagina = porPrioridad[0];
+    bizagiPage = mejorPagina.page;
+    await bizagiPage.bringToFront().catch(() => {});
+    console.log(`[Bizagi] Reutilizando pestaña Bizagi existente para ${mpn}`);
+
+    // Detectar si la pestaña ya está en pantalla de Gestionar Coincidencias
+    if (mejorPagina.tieneGestionar) {
+      console.log(`[Bizagi] Página Bizagi candidata ya está en Gestionar Coincidencias=true`);
+      console.log(`[Bizagi] Pestaña existente ya está en Gestionar Coincidencias para ${mpn}; no se buscará de nuevo`);
+    }
+  }
+
+  // Helper para cerrar popup de salida si aparece
+  const cerrarPopupSalidaBizagiSiAparece = async (page: Page | null): Promise<boolean> => {
+    if (!page) {
+      console.log('[Bizagi] cerrarPopupSalidaBizagiSiAparece omitido: page inválida');
+      return false;
+    }
+    const popupSalida = page.getByText(/¿Desea guardar cambios antes de salir/i).first();
+    const visible = await popupSalida.isVisible().catch(() => false);
+    if (!visible) return false;
+    console.log('[Bizagi] Popup de salida detectado; click en Cancelar para permanecer en OFAC');
+    const btnCancelar = page.getByRole('button', { name: /Cancelar/i }).first();
+    if (await btnCancelar.isVisible().catch(() => false)) {
+      await btnCancelar.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+    return true;
+  };
+
+  if (!bizagiPage) {
+    console.log(`[Bizagi] No hay pestaña Bizagi reutilizable; creando nueva página`);
+    bizagiPage = await portalPage.context().newPage();
+    await bizagiPage.goto(bizagiUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await entrarABizagiSiHayLoginRobusto(bizagiPage, bizagiUsuario, bizagiPassword);
+  } else {
+    console.log(`[Bizagi] Página Bizagi activa seleccionada para ${mpn}`);
+  }
+
+  // Garantizar que bizagiPage es válida antes de continuar
+  if (!bizagiPage) {
+    throw new Error(`[Bizagi][CRITICO] No se pudo obtener página Bizagi válida para ${mpn}`);
+  }
+  console.log(`[Bizagi] Página Bizagi válida obtenida para ${mpn}`);
+
+  // Cerrar popup de salida si aparece
+  await cerrarPopupSalidaBizagiSiAparece(bizagiPage);
+
+  // Si la pestaña ya está en Gestionar Coincidencias (tieneGestionar), NO buscar MPN de nuevo
+  let yaEstaEnGestion = false;
+  if (paginasBizagi.length > 0) {
+    const porPrioridad = paginasBizagi.sort((a, b) => {
+      const scoreA = (a.tieneGestionar ? 3 : 0) + (a.tieneMpn ? 2 : 0) + (a.tieneMenu ? 1 : 0);
+      const scoreB = (b.tieneGestionar ? 3 : 0) + (b.tieneMpn ? 2 : 0) + (b.tieneMenu ? 1 : 0);
+      return scoreB - scoreA;
+    });
+    yaEstaEnGestion = porPrioridad[0].tieneGestionar;
+  }
+
+  if (yaEstaEnGestion) {
+    console.log(`[Bizagi] Navegando directamente a OFAC en pestaña existente sin buscar MPN`);
+    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+  } else {
+    // Priorizar el flujo de Admin si el buscador global suele fallar
+    const casoEncontrado = await buscarCasoPorMpnEnBizagi(bizagiPage, mpn, { useAdminFallback: true, openIfFound: true });
+    if (!casoEncontrado) {
+      throw new Error(`[CRITICO] No se encontro ninguna fila en Bizagi para '${mpn}'.`);
+    }
+    await abrirSolicitudCumplimientoBizagiRapido(bizagiPage, mpn);
+    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+  }
 
   await portalPage.bringToFront().catch(() => {});
   return { mpn, bizagiPage };
