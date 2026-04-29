@@ -115,6 +115,9 @@ async function clickContinuarDesdeVerificacionAprobada(
         if (modalSalidaAntesClick) {
             throw new Error(`[CRITICO] Se detecto el modal 'Salir del proceso de solicitud' antes de Continuar (${contexto}). Se cancelo el modal para evitar salir por error.`);
         }
+        if (await estaEnPantallaProductos(page).catch(() => false) && await modalConfiguracionProductoVisible(page).catch(() => false)) {
+            throw new Error('[Producto][CRITICO] Se intentó Continuar con modal de configuración abierto');
+        }
 
         const candidatos = page.getByRole('button', { name: /^Continuar$/i });
         const total = await candidatos.count().catch(() => 0);
@@ -286,6 +289,9 @@ async function clickContinuarTrasAprobadoRapido(page: Page) {
     await esperarFinGuardandoSolicitudRapido(page).catch(() => false);
     const inicio = Date.now();
     while (Date.now() - inicio < (FAST_UI ? 8000 : 10000)) {
+        if (await estaEnPantallaProductos(page).catch(() => false) && await modalConfiguracionProductoVisible(page).catch(() => false)) {
+            throw new Error('[Producto][CRITICO] Se intentó Continuar con modal de configuración abierto');
+        }
         const btnContinuar = await getBotonContinuarPrincipal(page);
         const visible = btnContinuar ? await btnContinuar.isVisible().catch(() => false) : false;
         const enabled = visible && btnContinuar ? await btnContinuar.isEnabled().catch(() => false) : false;
@@ -418,6 +424,9 @@ async function clickContinuarRobusto(
     while (Date.now() - inicio < timeoutMs) {
         await cerrarPopupEdgeSyncSiVisible(page).catch(() => false);
         await esperarFinActualizandoSolicitud(page, FAST_UI ? 4000 : 7000).catch(() => false);
+        if (await estaEnPantallaProductos(page).catch(() => false) && await modalConfiguracionProductoVisible(page).catch(() => false)) {
+            throw new Error('[Producto][CRITICO] Se intentó Continuar con modal de configuración abierto');
+        }
 
         const btnContinuar = await getBotonContinuarPrincipal(page);
         if (!btnContinuar) {
@@ -686,8 +695,11 @@ async function intentarAvanceRealHaciaTaller(
 
     for (let intento = 1; intento <= maxClicks; intento++) {
         if (options?.tipoCuenta && await estaEnPantallaProductos(page).catch(() => false)) {
-            const productoVisible = await productoAgregadoVisible(page, options.tipoCuenta).catch(() => false);
-            console.log(`[Producto] Producto agregado visible=${productoVisible}`);
+            if (await modalConfiguracionProductoVisible(page).catch(() => false)) {
+                throw new Error('[Producto][CRITICO] Se intentó Continuar con modal de configuración abierto');
+            }
+            const productoVisible = await productoAgregadoComoTarjetaVisible(page, options.tipoCuenta).catch(() => false);
+            console.log(`[Producto] Producto agregado como tarjeta final visible=${productoVisible}`);
             if (!productoVisible) {
                 throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
             }
@@ -4899,7 +4911,13 @@ const productoConfirmadoEnRegistro = (registro: RegistroExcel) =>
     productosConfirmadosPorRegistro.has(productoRegistroKey(registro));
 
 async function marcarProductoConfirmadoSiYaVisible(page: Page, registro: RegistroExcel) {
-    const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    const modalProductoVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+    console.log(`[Producto][Guard] modalConfiguracionProductoVisible=${modalProductoVisible}`);
+    if (modalProductoVisible) {
+        console.log('[Producto][Guard] Producto visible dentro del modal; no cuenta como agregado final');
+        return false;
+    }
+    const productoVisible = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
     if (!productoVisible) return false;
     console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
     marcarProductoConfirmado(registro);
@@ -5372,6 +5390,63 @@ async function productoAgregadoVisible(page: Page, tipoCuenta: string) {
     return detectarProductoAgregadoEnUI(page, page.locator('body'), tipoCuenta, { useGlobalFallback: true }).catch(() => false);
 }
 
+async function productoAgregadoComoTarjetaVisible(page: Page, tipoCuenta: string) {
+    if (await modalConfiguracionProductoVisible(page).catch(() => false)) return false;
+
+    const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
+    if (await msgSinProductos.isVisible().catch(() => false)) return false;
+
+    const tipoCuentaSafe = String(tipoCuenta ?? '').trim();
+    if (!tipoCuentaSafe) return false;
+
+    const nombreProducto = extraerNombreProducto(tipoCuentaSafe);
+    const codigoProducto = extraerCodigoProducto(tipoCuentaSafe);
+    const candidatos = [tipoCuentaSafe, nombreProducto, codigoProducto]
+        .map((valor) => String(valor ?? '').trim())
+        .filter(Boolean);
+
+    const seccionProductos = await localizarSeccionProductos(page);
+    const seccionVisible = await seccionProductos.isVisible().catch(() => false);
+    const scope = seccionVisible ? seccionProductos : page.locator('body');
+
+    return scope.evaluate((root, payload) => {
+        const normalize = (value: string) =>
+            String(value ?? '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+
+        const rootElement = root as HTMLElement;
+        const targets = payload.targets.map(normalize).filter(Boolean);
+        if (!targets.length) return false;
+
+        const excludedSelector = [
+            '.p-dialog',
+            '[role="dialog"]',
+            '.p-component-overlay',
+            '.p-dropdown',
+            '[data-pc-name="dropdown"]',
+            '[role="combobox"]',
+        ].join(',');
+
+        const elements = [rootElement, ...Array.from(rootElement.querySelectorAll('*'))] as HTMLElement[];
+        for (const element of elements) {
+            if (!(element instanceof HTMLElement)) continue;
+            if (element.closest(excludedSelector)) continue;
+
+            const text = normalize(element.innerText || element.textContent || '');
+            if (!text) continue;
+            if (targets.some((target) => text.includes(target))) {
+                return true;
+            }
+        }
+
+        return false;
+    }, { targets: candidatos }).catch(() => false);
+}
+
 async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: RegistroExcel): Promise<void | 'producto-confirmado'> {
     if (!await estaEnPantallaProductos(page).catch(() => false)) return;
 
@@ -5381,7 +5456,7 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
         console.log('[Producto] Continuando con producto ya confirmado');
         return 'producto-confirmado';
     }
-    const productoYaVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    const productoYaVisible = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
     if (productoYaVisible) {
         console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
         console.log('[Producto] Evitando duplicar producto/cuenta');
@@ -5412,7 +5487,7 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
         }
     }
 
-    const productoVisibleAntesDeSeleccion = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+    const productoVisibleAntesDeSeleccion = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
     if (productoVisibleAntesDeSeleccion) {
         console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
         console.log('[Producto] Evitando duplicar producto/cuenta');
@@ -5433,8 +5508,8 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
         await etapaSeccionProductosPostSeleccion(page, registro, seccionProductos);
     }
 
-    const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
-    console.log(`[Producto] Producto agregado visible=${productoVisible}`);
+    const productoVisible = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
+    console.log(`[Producto] Producto agregado como tarjeta final visible=${productoVisible}`);
     if (!productoVisible) {
         throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
     }
@@ -5442,8 +5517,20 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
     console.log('[Producto] Producto confirmado, ahora si se puede Continuar hacia Verificaciones');
 }
 
+async function modalConfiguracionProductoVisible(page: Page): Promise<boolean> {
+    const modalExplicito = page
+        .locator('.p-dialog:visible, [role="dialog"]:visible')
+        .filter({ hasText: /Cuentas de efectivo/i })
+        .filter({ hasText: /Balance promedio/i })
+        .filter({ hasText: /Tasa|Calcular tasa/i })
+        .filter({ hasText: /Aceptar|Agregar/i })
+        .first();
+    if (await modalExplicito.isVisible().catch(() => false)) return true;
+    return modalProductoConfigVisibleShared(page, /Cuentas de efectivo|Balance promedio|Moneda|Tasa|Calcular tasa|Aceptar|Agregar/i);
+}
+
 async function modalProductoConfigVisible(page: Page) {
-    return modalProductoConfigVisibleShared(page, /Cuentas de efectivo|Balance promedio|Moneda|Tasa/i);
+    return modalConfiguracionProductoVisible(page);
 }
 
 async function confirmarSeleccionProductoRapida(
@@ -5759,7 +5846,8 @@ async function seleccionarProductoEnSeccionProductos(
     seccionProductos: Locator,
     tipoCuenta: string
 ) {
-    if (await productoAgregadoVisible(page, tipoCuenta).catch(() => false)) {
+    const modalProductoVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+    if (!modalProductoVisible && await productoAgregadoComoTarjetaVisible(page, tipoCuenta).catch(() => false)) {
         console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
         return;
     }
@@ -5803,14 +5891,14 @@ async function etapaSeccionProductosPostSeleccion(
     const confirmarProductoAgregado = async () => {
         if (await modalProductoConfigVisible(page)) return false;
         seccionProductos = await localizarSeccionProductos(page);
-        const enUI = await detectarProductoAgregadoEnUI(page, seccionProductos, registro.tipoCuenta).catch(() => false);
+        const enUI = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
         if (enUI) return true;
         const sinProductos = await msgSinProductos.isVisible().catch(() => false);
         if (sinProductos) return false;
         await page.waitForTimeout(FAST_UI ? 500 : 1200);
         if (await modalProductoConfigVisible(page)) return false;
         seccionProductos = await localizarSeccionProductos(page);
-        return detectarProductoAgregadoEnUI(page, seccionProductos, registro.tipoCuenta).catch(() => false);
+        return productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
     };
 
     const clickAgregarProductoDesdeBalance = async () => {
@@ -6056,7 +6144,7 @@ async function etapaSeccionProductosPostSeleccion(
     const esperarProductoVisibleTrasAgregar = async (timeoutMs = FAST_UI ? 5000 : 8000) => {
         const inicio = Date.now();
         while (Date.now() - inicio < timeoutMs) {
-            const visible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            const visible = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
             if (visible) return true;
             const confirmado = await confirmarProductoAgregado().catch(() => false);
             if (confirmado) return true;
@@ -6093,7 +6181,8 @@ async function etapaSeccionProductosPostSeleccion(
                     break;
                 }
                 if (intentoProducto < 3) {
-                    if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                    if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                        && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                         console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                         productoAgregado = true;
                         marcarProductoConfirmado(registro);
@@ -6119,7 +6208,8 @@ async function etapaSeccionProductosPostSeleccion(
             const confirmoSinBalance = await confirmarProductoAgregado();
             if (confirmoSinBalance) { productoAgregado = true; marcarProductoConfirmado(registro); break; }
             if (intentoProducto < 3) {
-                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                    && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                     console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                     productoAgregado = true;
                     marcarProductoConfirmado(registro);
@@ -6146,7 +6236,8 @@ async function etapaSeccionProductosPostSeleccion(
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         if (!clicAgregar) {
             if (intentoProducto < 3) {
-                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                    && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                     console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                     productoAgregado = true;
                     marcarProductoConfirmado(registro);
@@ -6172,6 +6263,7 @@ async function etapaSeccionProductosPostSeleccion(
         if (aparecioTrasAgregar) {
             console.log('[Producto] Producto apareció después del primer Agregar; no se reintentará Agregar');
             console.log('[Producto] Evitando duplicar producto/cuenta');
+            console.log('[Producto] Producto agregado como tarjeta final visible=true');
             productoAgregado = true;
             marcarProductoConfirmado(registro);
             break;
@@ -6186,7 +6278,8 @@ async function etapaSeccionProductosPostSeleccion(
         }
 
         if (intentoProducto < 3) {
-            const visibleAntesDeReintentar = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            const visibleAntesDeReintentar = !await modalConfiguracionProductoVisible(page).catch(() => false)
+                && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
             if (visibleAntesDeReintentar) {
                 console.log('[Producto] Producto apareció después del primer Agregar; no se reintentará Agregar');
                 console.log('[Producto] Evitando duplicar producto/cuenta');
@@ -6223,7 +6316,8 @@ async function etapaSeccionProductosPostSeleccion(
 }
 
 async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
-    if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+    if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+        && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
         console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
         marcarProductoConfirmado(registro);
         return;
@@ -6690,7 +6784,8 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         const balanceLleno = await llenarBalancePromedioEnContexto();
         if (!balanceLleno) {
             if (intentoProducto < 3) {
-                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                    && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                     console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                     productoAgregado = true;
                     break;
@@ -6709,7 +6804,8 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         if (!clicAgregar) {
             if (intentoProducto < 3) {
-                if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+                if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                    && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                     console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                     productoAgregado = true;
                     break;
@@ -6732,7 +6828,8 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         }
 
         if (intentoProducto < 3) {
-            if (await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false)) {
+            if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+                && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
                 console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
                 productoAgregado = true;
                 break;
@@ -6883,7 +6980,8 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
                 }
                 continue;
             }
-            const productoVisible = await productoAgregadoVisible(page, registro.tipoCuenta).catch(() => false);
+            const productoVisible = !await modalConfiguracionProductoVisible(page).catch(() => false)
+                && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
             if (productoVisible) {
                 marcarProductoConfirmado(registro);
                 console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
