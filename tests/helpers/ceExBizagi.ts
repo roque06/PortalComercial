@@ -1414,36 +1414,42 @@ async function esperarComboBizagiHabilitado(
 }
 
 async function seleccionarMotivoCoincidenciasOfacCumplimiento(bizagiPage: Page, context: Page | import('@playwright/test').Frame | Locator) {
-  // --- INTENTO PRIORITARIO (Basado en grabación exitosa) ---
+  const seleccionarPrimeraOpcionVisible = async () => {
+    const opciones = bizagiPage.locator(
+      '.ui-select-dropdown.open [role="option"], .ui-select-dropdown.open li, [role="listbox"][aria-expanded="true"] [role="option"], li[role="option"]:visible, .ui-selectmenu-item:visible'
+    );
+    const total = await opciones.count().catch(() => 0);
+    for (let idx = 0; idx < total; idx++) {
+      const opcion = opciones.nth(idx);
+      if (!(await opcion.isVisible().catch(() => false))) continue;
+      const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+      if (!texto || /seleccione|please select/i.test(texto)) continue;
+      await opcion.click({ force: true }).catch(() => {});
+      console.log(`[Cumplimiento][Bizagi] Motivo Coincidencias OFAC = index 0 ('${texto}')`);
+      return true;
+    }
+    return false;
+  };
+
+  // --- INTENTO PRIORITARIO (Basado en el control mostrado por Bizagi) ---
   const comboGrabado = context.getByRole('combobox', { name: 'Motivo Coincidencias OFAC:' }).first();
   if (await comboGrabado.isVisible().catch(() => false)) {
-      console.log('[Cumplimiento][Bizagi] Aplicando secuencia grabada para Motivo OFAC (Triple Click)...');
-      // El usuario indico que necesita 3 clics para que el combo abra de forma fiable en su ambiente
+      console.log('[Cumplimiento][Bizagi] Abriendo Motivo OFAC para seleccionar index 0...');
       await comboGrabado.click({ force: true }).catch(() => {});
       await bizagiPage.waitForTimeout(150);
       await comboGrabado.click({ force: true }).catch(() => {});
       await bizagiPage.waitForTimeout(150);
       await comboGrabado.click({ force: true }).catch(() => {});
-      
-      const opcionGrabada = bizagiPage.getByRole('option', { 
-          name: 'Coincidencia descartada por no corresponderse con la persona incluida en las Listas de Control Internas de Clientes', 
-          exact: true 
-      }).first();
-      
-      if (await opcionGrabada.isVisible({ timeout: 5000 }).catch(() => false)) {
-          await opcionGrabada.click({ force: true }).catch(() => {});
-          console.log('[Cumplimiento][Bizagi] Motivo OFAC seleccionado exitosamente vía grabación.');
+      await bizagiPage.waitForTimeout(300);
+
+      if (await seleccionarPrimeraOpcionVisible()) {
           return;
-      } else {
-          console.log('[Cumplimiento][Bizagi][WARN] No se desplegaron las opciones tras el triple click.');
-          // Intentar ArrowDown como fallback inmediato
-          await comboGrabado.press('ArrowDown').catch(() => {});
-          await bizagiPage.waitForTimeout(300);
-          if (await opcionGrabada.isVisible().catch(() => false)) {
-              await opcionGrabada.click({ force: true }).catch(() => {});
-              return;
-          }
       }
+
+      console.log('[Cumplimiento][Bizagi][WARN] No se desplegaron opciones tras abrir Motivo OFAC. Reintentando con ArrowDown.');
+      await comboGrabado.press('ArrowDown').catch(() => {});
+      await bizagiPage.waitForTimeout(300);
+      if (await seleccionarPrimeraOpcionVisible()) return;
   }
   // ---------------------------------------------------------
 
@@ -1507,31 +1513,18 @@ async function seleccionarMotivoCoincidenciasOfacCumplimiento(bizagiPage: Page, 
 
     const total = await opciones.count().catch(() => 0);
     if (total > 0) {
-      let indiceObjetivo = -1;
-      let textoObjetivo = '';
-      const textoExactoGrabado = 'Coincidencia descartada por no corresponderse con la persona incluida en las Listas de Control Internas de Clientes';
-      
-      for (let idx = 0; idx < total; idx++) {
-        const texto = ((await opciones.nth(idx).innerText().catch(() => '')) || '').trim();
-        if (texto.includes(textoExactoGrabado)) {
+      let indiceObjetivo = 0;
+      let textoObjetivo = ((await opciones.nth(0).innerText().catch(() => '')) || '').trim();
+      if (/seleccione|please select/i.test(textoObjetivo)) {
+        for (let idx = 1; idx < total; idx++) {
+          const texto = ((await opciones.nth(idx).innerText().catch(() => '')) || '').trim();
+          if (!/seleccione|please select/i.test(texto)) {
             indiceObjetivo = idx;
             textoObjetivo = texto;
             break;
+          }
         }
       }
-
-      if (indiceObjetivo === -1) {
-          for (let idx = 0; idx < total; idx++) {
-            const texto = ((await opciones.nth(idx).innerText().catch(() => '')) || '').trim();
-            if (!/seleccione|please select/i.test(texto)) {
-              indiceObjetivo = idx;
-              textoObjetivo = texto;
-              break;
-            }
-          }
-      }
-
-      if (indiceObjetivo === -1) indiceObjetivo = 0;
 
       await opciones.nth(indiceObjetivo).click({ force: true }).catch(() => {});
       await bizagiPage.waitForTimeout(250);
@@ -1545,7 +1538,11 @@ async function seleccionarMotivoCoincidenciasOfacCumplimiento(bizagiPage: Page, 
     }
   }
 
-  console.log("[Cumplimiento][Bizagi] Motivo Coincidencias OFAC = index 1 (primer valor real)");
+  if (!seleccionado) {
+    throw new Error("[CRITICO] No se pudo seleccionar index 0 en 'Motivo Coincidencias OFAC'.");
+  }
+
+  console.log("[Cumplimiento][Bizagi] Motivo Coincidencias OFAC = index 0");
 }
 
 function obtenerConfiguracionAccionOfac() {
@@ -1808,23 +1805,6 @@ async function manejarCoincidenciasOfacDirectoBizagi(bizagiPage: Page) {
       await bizagiPage.waitForTimeout(800); // Espera a que se habilite el combo de motivo
   }
   
-  await seleccionarMotivoCoincidenciasOfacCumplimiento(bizagiPage, bizagiPage);
-  
-  // El usuario grabo que despues de seleccionar el motivo debe dar Siguiente y Aceptar
-  const btnSiguiente = bizagiPage.getByRole('button', { name: 'Siguiente' }).first();
-  if (await btnSiguiente.isVisible().catch(() => false)) {
-      console.log('[Cumplimiento][Bizagi] Haciendo click en Siguiente (secuencia OFAC)...');
-      await btnSiguiente.click({ force: true }).catch(() => {});
-      await bizagiPage.waitForTimeout(800);
-      
-      const btnAceptar = bizagiPage.getByRole('button', { name: 'Aceptar' }).first();
-      if (await btnAceptar.isVisible().catch(() => false)) {
-          console.log('[Cumplimiento][Bizagi] Haciendo click en Aceptar (confirmacion OFAC)...');
-          await btnAceptar.click({ force: true }).catch(() => {});
-      }
-  }
-  // ---------------------------------------------------------
-
   const radioDescartar = bizagiPage.locator('input[type="radio"][id*="sidP_AccOFAC"][value="2"]').first();
   const comboMotivo = bizagiPage
     .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox"] | //*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[contains(@class,"ui-select-data")])[1]')
@@ -1928,16 +1908,6 @@ async function manejarCoincidenciasOfacConfirmarXpathBizagi(bizagiPage: Page) {
       await seleccionarNoSolicitarAclaracionesCumplimiento(context as any);
   } catch (e) {
       console.log(`[Cumplimiento][Bizagi][WARN] No se pudo marcar Aclaraciones: ${e.message}`);
-  }
-
-  // 5. Boton Siguiente (Final)
-  const btnSiguiente = context.getByRole('button', { name: /Siguiente/i }).first();
-  const visibleSiguiente = await btnSiguiente.isVisible().catch(() => false);
-  console.log(`[Cumplimiento][Bizagi] Boton Siguiente visible: ${visibleSiguiente}`);
-
-  if (visibleSiguiente) {
-      await btnSiguiente.click({ force: true }).catch(() => {});
-      return true;
   }
 
   return !!radioDescartar || !!comboMotivo;
@@ -2291,13 +2261,198 @@ async function clickSiguienteCumplimiento(bizagiPage: Page) {
   console.log("[Cumplimiento][Bizagi] Click en Siguiente");
 }
 
+async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
+  const pantalla = bizagiPage
+    .locator('body')
+    .filter({ hasText: /Gesti[oó]n de Coincidencias|Coincidencias OFAC|Acci[oó]n Coincidencias OFAC|Motivo Coincidencias OFAC|Solicitar Aclaraciones/i })
+    .first();
+  await pantalla.waitFor({ state: 'visible', timeout: 20000 });
+  console.log('[OFAC] Pantalla Gestionar Coincidencias detectada');
+
+  const clickCentro = async (loc: Locator) => {
+    const box = await loc.boundingBox().catch(() => null);
+    if (box) await bizagiPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+  };
+
+  console.log('[OFAC] Seleccionando Acción Coincidencias OFAC: Descartar');
+  let labelDescartar = bizagiPage
+    .locator('xpath=//label[contains(@for,"sidP_AccOFAC-2") and normalize-space()="Descartar"]')
+    .first();
+  if (!(await labelDescartar.isVisible().catch(() => false))) {
+    labelDescartar = bizagiPage
+      .locator('xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/following-sibling::label[normalize-space()="Descartar"] | //input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/../label[normalize-space()="Descartar"])[1]')
+      .first();
+  }
+  if (!(await labelDescartar.isVisible().catch(() => false))) {
+    labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+  }
+  await labelDescartar.waitFor({ state: 'visible', timeout: 10000 });
+  await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
+  await labelDescartar.click({ force: true }).catch(() => {});
+  await clickCentro(labelDescartar);
+  await labelDescartar.evaluate((label) => {
+    const lbl = label as HTMLLabelElement;
+    const input = lbl.htmlFor
+      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+    const fireMouse = (el: HTMLElement | null) => {
+      if (!el) return;
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    };
+    fireMouse(lbl);
+    fireMouse(input);
+    if (input) {
+      input.checked = true;
+      input.setAttribute('checked', 'checked');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }).catch(() => {});
+  await bizagiPage.waitForTimeout(400);
+
+  const accionDescartar = await labelDescartar.evaluate((label) => {
+    const lbl = label as HTMLLabelElement;
+    const input = lbl.htmlFor
+      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
+    const className = `${lbl.className || ''} ${input?.className || ''}`;
+    return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
+  }).catch(() => false);
+  console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
+  if (!accionDescartar) throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'Descartar' en Acción Coincidencias OFAC.");
+
+  console.log('[OFAC] Seleccionando Motivo Coincidencias OFAC index 1');
+  const comboMotivo = bizagiPage
+    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
+    .first();
+  await comboMotivo.waitFor({ state: 'visible', timeout: 10000 });
+  const comboMotivoHabilitado = await esperarComboBizagiHabilitado(bizagiPage, comboMotivo, 'Motivo Coincidencias OFAC', 8000);
+  if (!comboMotivoHabilitado) {
+    throw new Error("[CRITICO][OFAC] Motivo Coincidencias OFAC sigue deshabilitado despues de seleccionar Descartar.");
+  }
+  const triggerMotivo = bizagiPage
+    .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::div[contains(@class,"ui-selectmenu-btn") or contains(@class,"ui-selectmenu-button") or contains(@class,"ui-selectmenu-trigger")][1])')
+    .first();
+
+  let motivoSeleccionado = false;
+  let valorMotivo = '';
+  for (let intento = 1; intento <= 4 && !motivoSeleccionado; intento++) {
+    await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
+    await comboMotivo.click({ force: true }).catch(() => {});
+    if (await triggerMotivo.isVisible().catch(() => false)) {
+      await triggerMotivo.click({ force: true }).catch(() => {});
+    }
+    await comboMotivo.press('ArrowDown').catch(() => {});
+
+    const opciones = bizagiPage.locator('div.ui-select-dropdown.open li[role="option"], div.ui-select-dropdown.open [role="option"], [role="listbox"] li[role="option"]');
+    const hayOpciones = await opciones.first().waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false);
+    if (!hayOpciones) {
+      await bizagiPage.keyboard.press('Escape').catch(() => {});
+      await bizagiPage.waitForTimeout(250);
+      continue;
+    }
+
+    const opcionesVisibles: Locator[] = [];
+    const total = await opciones.count().catch(() => 0);
+    for (let idx = 0; idx < total; idx++) {
+      const opcion = opciones.nth(idx);
+      if (!(await opcion.isVisible().catch(() => false))) continue;
+      opcionesVisibles.push(opcion);
+    }
+
+    const opcionIndex1 = opcionesVisibles[1];
+    if (opcionIndex1) {
+      await opcionIndex1.click({ force: true }).catch(() => {});
+    }
+
+    await bizagiPage.waitForTimeout(500);
+    valorMotivo = ((await comboMotivo.inputValue().catch(() => '')) || '').trim();
+    if (!valorMotivo) {
+      valorMotivo = ((await comboMotivo.evaluate((el) => {
+        const input = el as HTMLInputElement;
+        return input.value || input.getAttribute('value') || input.getAttribute('title') || input.textContent || '';
+      }).catch(() => '')) || '').trim();
+    }
+    motivoSeleccionado = !!valorMotivo && !/^[-\s]+$/.test(valorMotivo) && !/por favor seleccione|seleccione|please select/i.test(valorMotivo);
+  }
+  console.log(`[OFAC] Motivo Coincidencias OFAC seleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
+  if (!motivoSeleccionado) throw new Error("[CRITICO][OFAC] No se pudo seleccionar index 1 en Motivo Coincidencias OFAC.");
+
+  console.log('[OFAC] Seleccionando Solicitar Aclaraciones: No');
+  const bloqueAclaraciones = bizagiPage
+    .locator('xpath=//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/ancestor::*[self::div or self::section or self::fieldset or self::form][1]')
+    .first();
+  await bloqueAclaraciones.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+  let labelNo = bloqueAclaraciones.locator('label').filter({ hasText: /^No$/i }).first();
+  if (!(await labelNo.isVisible().catch(() => false))) {
+    labelNo = bizagiPage
+      .locator('xpath=(//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/following::label[normalize-space()="No"])[1]')
+      .first();
+  }
+  await labelNo.waitFor({ state: 'visible', timeout: 10000 });
+  await labelNo.scrollIntoViewIfNeeded().catch(() => {});
+  await labelNo.click({ force: true }).catch(() => {});
+  await clickCentro(labelNo);
+  await labelNo.evaluate((label) => {
+    const lbl = label as HTMLLabelElement;
+    const input = lbl.htmlFor
+      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+    const fireMouse = (el: HTMLElement | null) => {
+      if (!el) return;
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    };
+    fireMouse(lbl);
+    fireMouse(input);
+    if (input) {
+      input.checked = true;
+      input.setAttribute('checked', 'checked');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }).catch(() => {});
+  await bizagiPage.waitForTimeout(300);
+  const solicitarAclaracionesNo = await labelNo.evaluate((label) => {
+    const lbl = label as HTMLLabelElement;
+    const input = lbl.htmlFor
+      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+      : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+    const className = `${lbl.className || ''} ${input?.className || ''}`;
+    return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
+  }).catch(() => false);
+  console.log(`[OFAC] Solicitar Aclaraciones No marcado=${solicitarAclaracionesNo}`);
+  if (!solicitarAclaracionesNo) throw new Error("[CRITICO][OFAC] No se pudo seleccionar 'No' en Solicitar Aclaraciones.");
+
+  console.log(`[OFAC] accionDescartar=${accionDescartar}`);
+  console.log(`[OFAC] motivoSeleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
+  console.log(`[OFAC] solicitarAclaracionesNo=${solicitarAclaracionesNo}`);
+
+  if (!accionDescartar || !motivoSeleccionado || !solicitarAclaracionesNo) {
+    throw new Error('[CRITICO][OFAC] No se puede continuar porque una validacion OFAC fallo.');
+  }
+
+  const btnSiguiente = bizagiPage.getByRole('button', { name: /Siguiente/i }).first();
+  await btnSiguiente.waitFor({ state: 'visible', timeout: 15000 });
+  await btnSiguiente.scrollIntoViewIfNeeded().catch(() => {});
+  await btnSiguiente.click({ force: true });
+  console.log('[OFAC] Click en Siguiente');
+
+  const btnAceptar = bizagiPage.getByRole('button', { name: /^Aceptar$/i }).first();
+  if (await btnAceptar.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false)) {
+    await btnAceptar.click({ force: true }).catch(() => {});
+  }
+
+  await bizagiPage.waitForLoadState('domcontentloaded').catch(() => {});
+  await bizagiPage.waitForTimeout(1500);
+  console.log('[OFAC] Gestión OFAC completada');
+}
+
 async function completarGestionCoincidenciasCumplimientoBizagi(bizagiPage: Page) {
-  console.log('[Cumplimiento][Bizagi] completando acciones...');
-  await seleccionarAccionesCumplimientoBizagi(bizagiPage);
-  console.log('[Cumplimiento][Bizagi] completando solicitar aclaraciones...');
-  await seleccionarNoSolicitarAclaracionesCumplimiento(bizagiPage);
-  console.log('[Cumplimiento][Bizagi] haciendo click en Siguiente...');
-  await clickSiguienteCumplimiento(bizagiPage);
+  await completarOfacGestionCoincidenciasBizagi(bizagiPage);
 }
 
 async function pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage: Page) {
