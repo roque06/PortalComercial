@@ -4084,9 +4084,10 @@ async function leerValorDropdownEnScope(
 async function detectarProductoAgregadoEnUI(
     page: Page,
     seccionProductos: Locator,
-    tipoCuenta: string
+    tipoCuenta: string,
+    options?: { useGlobalFallback?: boolean }
 ) {
-    return detectarProductoAgregadoEnUIShared(page, seccionProductos, tipoCuenta, { useGlobalFallback: true });
+    return detectarProductoAgregadoEnUIShared(page, seccionProductos, tipoCuenta, options ?? { useGlobalFallback: true });
 }
 
 async function modalProductoConfigVisible(page: Page) {
@@ -4807,6 +4808,16 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
             beforeStart: async (currentPage) => cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false),
             isPreProductos: estaEnPantallaPreProductos,
             onPreProductos: async (currentPage) => {
+                // Validacion extra: si por algun motivo ya detectamos la seccion de productos (ej. scroll parcial)
+                // NO le damos a continuar para evitar saltarnos la seleccion.
+                const seccionExistente = await localizarSeccionProductos(currentPage);
+                const visible = await seccionExistente.isVisible().catch(() => false);
+                const countDrops = await seccionExistente.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
+                if (visible && countDrops >= 2) {
+                    console.log('[NAV-PRODUCTO] Seccion productos detectada durante onPreProductos. Omitiendo click en Continuar.');
+                    return;
+                }
+
                 const btnContinuar = getBotonContinuar(currentPage);
                 const continuarVisible = await btnContinuar.isVisible().catch(() => false);
                 const continuarEnabled = continuarVisible
@@ -4818,6 +4829,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                     } catch (e) {
                         const msg = e instanceof Error ? e.message : String(e);
                         if (/\[CRITICO\].*Gestion documental/i.test(msg)) throw e;
+                        console.log(`[NAV-PRODUCTO] Click en Continuar para llegar a productos (${msg})...`);
                         await btnContinuar.click({ force: true }).catch(() => { });
                         await esperarFinActualizandoSolicitud(currentPage, 25000).catch(() => false);
                         await currentPage.waitForTimeout(600);
@@ -5332,14 +5344,27 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
     const msgSinProductosDespuesContinuar = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const labelPropositoTaller = page.locator('label').filter({ hasText: /Prop(?:o|\u00f3)sito/i }).first();
     let seccionProductos = await localizarSeccionProductos(page);
-    const sinProductosAntesContinuar = await msgSinProductosDespuesContinuar.isVisible().catch(() => false);
-    const seccionProductosVisibleAntes = await seccionProductos.isVisible().catch(() => false);
-    const productoEnUIPrevio = seccionProductosVisibleAntes
-        ? await detectarProductoAgregadoEnUI(page, seccionProductos, registro.tipoCuenta).catch(() => false)
-        : true;
-    if (sinProductosAntesContinuar || (seccionProductosVisibleAntes && !productoEnUIPrevio)) {
-        throw new Error(`[CRITICO] Bloqueado 'Continuar': aun no hay productos agregados para '${registro.tipoCuenta}'.`);
+    
+    // --- VALIDACION ESTRICTA SOLICITADA POR EL USUARIO ---
+    const verificarProductoAntesDeContinuar = async () => {
+        const sinProductosVisible = await msgSinProductosDespuesContinuar.isVisible().catch(() => false);
+        if (sinProductosVisible) return false;
+        
+        seccionProductos = await localizarSeccionProductos(page);
+        const seccionVisible = await seccionProductos.isVisible().catch(() => false);
+        const productoEnUI = seccionVisible
+            ? await detectarProductoAgregadoEnUI(page, seccionProductos, registro.tipoCuenta).catch(() => false)
+            : await detectarProductoAgregadoEnUI(page, page.locator('body'), registro.tipoCuenta, { useGlobalFallback: true }).catch(() => false);
+            
+        return productoEnUI;
+    };
+
+    const productoOk = await verificarProductoAntesDeContinuar();
+    if (!productoOk) {
+        console.log(`[Relacionados][BLOQUEO] No se detecta el producto '${registro.tipoCuenta}' agregado. Abortando click en Continuar.`);
+        throw new Error(`[CRITICO] Bloqueado 'Continuar': No se ha seleccionado o agregado el producto '${registro.tipoCuenta}'. El flujo no puede avanzar.`);
     }
+    // -----------------------------------------------------
 
     const completoPostProductoInicial = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
     if (completoPostProductoInicial) {
