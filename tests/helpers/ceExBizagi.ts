@@ -2351,104 +2351,141 @@ async function descartarOfacMarcadoEnDom(bizagiPage: Page): Promise<boolean> {
   }).catch(() => false);
 }
 
+async function dispararRadioOfacConfirmarDescartar(
+  bizagiPage: Page,
+  accion: 'Confirmar' | 'Descartar'
+): Promise<boolean> {
+  const esDescartar = accion === 'Descartar';
+  const labelSelectors = esDescartar
+    ? [
+        'xpath=//label[contains(@for,"sidP_AccOFAC-2") and normalize-space()="Descartar"]',
+        'xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/following-sibling::label[normalize-space()="Descartar"] | //input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/../label[normalize-space()="Descartar"])[1]',
+        'label',
+      ]
+    : [
+        'xpath=//label[normalize-space()="Confirmar"]',
+        'label',
+      ];
+  const inputSelectors = esDescartar
+    ? [
+        'xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"])[1]',
+        'xpath=(//input[@type="radio" and @value="2"])[1]',
+      ]
+    : [
+        'xpath=(//label[normalize-space()="Confirmar"]/@for)[1]',
+      ];
+
+  let labelLocator: Locator | null = null;
+  if (esDescartar) {
+    labelLocator = bizagiPage.locator(labelSelectors[0]).first();
+    if (!(await labelLocator.count().then((n) => n > 0).catch(() => false))) {
+      labelLocator = bizagiPage.locator(labelSelectors[1]).first();
+    }
+    if (!(await labelLocator.count().then((n) => n > 0).catch(() => false))) {
+      labelLocator = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
+    }
+  } else {
+    labelLocator = bizagiPage.locator('xpath=//label[normalize-space()="Confirmar"]').first();
+    if (!(await labelLocator.count().then((n) => n > 0).catch(() => false))) {
+      labelLocator = bizagiPage.locator('label').filter({ hasText: /^Confirmar$/i }).first();
+    }
+  }
+
+  const labelExists = await labelLocator.count().then((n) => n > 0).catch(() => false);
+  const labelVisible = labelExists ? await labelLocator.isVisible().catch(() => false) : false;
+  let inputExists = false;
+  let inputVisible = false;
+
+  if (!esDescartar && labelExists) {
+    inputExists = await labelLocator.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      return !!(lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor)
+        : lbl.closest('span, div')?.querySelector('input[type="radio"]'));
+    }).catch(() => false);
+    inputVisible = labelVisible;
+  } else if (esDescartar) {
+    const inputLocator = bizagiPage.locator('xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"] | //input[@type="radio" and @value="2"])[1]').first();
+    inputExists = await inputLocator.count().then((n) => n > 0).catch(() => false);
+    inputVisible = inputExists ? await inputLocator.isVisible().catch(() => false) : false;
+  }
+
+  if (!labelExists && !inputExists) {
+    if (!esDescartar) {
+      console.log('[OFAC] Confirmar no existe en DOM; re-disparando Descartar');
+    }
+    return false;
+  }
+
+  if (!esDescartar && !labelVisible && labelExists) {
+    console.log('[OFAC] Confirmar encontrado en DOM; disparando click real para refrescar dependencias');
+  }
+
+  if (labelVisible) {
+    await labelLocator.scrollIntoViewIfNeeded().catch(() => {});
+  }
+
+  if (esDescartar) {
+    console.log('[OFAC] Click real en Descartar después de Confirmar');
+  } else {
+    console.log('[OFAC] Click real en Confirmar para refrescar dependencias');
+  }
+
+  if (labelVisible) {
+    await labelLocator.click({ force: true }).catch(() => {});
+  }
+
+  await labelLocator.evaluate((label, payload) => {
+    const lbl = label as HTMLLabelElement;
+    const input = lbl.htmlFor
+      ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+      : lbl.closest('span, div')?.querySelector(payload.inputSelector) as HTMLInputElement | null;
+    const fireMouse = (el: HTMLElement | null) => {
+      if (!el) return;
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    };
+    fireMouse(lbl);
+    fireMouse(input);
+    if (input) {
+      input.checked = true;
+      input.setAttribute('checked', 'checked');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      if (payload.blur) {
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
+    }
+  }, {
+    inputSelector: esDescartar ? 'input[type="radio"][value="2"]' : 'input[type="radio"]',
+    blur: esDescartar,
+  }).catch(() => {});
+
+  await bizagiPage.waitForTimeout(esDescartar ? 1000 : 500);
+  return esDescartar ? descartarOfacMarcadoEnDom(bizagiPage) : true;
+}
+
+async function ejecutarSecuenciaDependienteOfacConfirmarDescartar(
+  bizagiPage: Page
+): Promise<boolean> {
+  console.log('[OFAC] Secuencia dependiente: Confirmar -> Descartar');
+  await dispararRadioOfacConfirmarDescartar(bizagiPage, 'Confirmar').catch(() => false);
+  const accionDescartar = await dispararRadioOfacConfirmarDescartar(bizagiPage, 'Descartar').catch(() => false);
+  console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
+  return accionDescartar;
+}
+
 async function seleccionarAccionOfacDescartarYEsperarMotivos(
   bizagiPage: Page
 ): Promise<{ accionDescartar: boolean; motivosDisponibles: boolean }> {
   console.log('[OFAC] Preparando carga de motivos: Confirmar -> Descartar');
-
-  const labelConfirmar = bizagiPage.locator('label').filter({ hasText: /^Confirmar$/i }).first();
-  const confirmarExiste = await labelConfirmar.isVisible().catch(() => false);
-  if (confirmarExiste) {
-    console.log('[OFAC] Click real en Confirmar para refrescar dependencias');
-    await labelConfirmar.click({ force: true }).catch(() => {});
-    await labelConfirmar.evaluate((label) => {
-      const lbl = label as HTMLLabelElement;
-      const input = lbl.htmlFor
-        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-        : lbl.closest('span, div')?.querySelector('input[type="radio"]') as HTMLInputElement | null;
-      const fireMouse = (el: HTMLElement | null) => {
-        if (!el) return;
-        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      };
-      fireMouse(lbl);
-      fireMouse(input);
-      if (input) {
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('blur', { bubbles: true }));
-      }
-    }).catch(() => {});
-    await bizagiPage.waitForTimeout(300);
-  } else {
-    console.log('[OFAC] Confirmar no visible; se continúa directo con Descartar');
-  }
-
-  console.log('[OFAC] Click real en Descartar');
-  let accionDescartar = await descartarOfacMarcadoEnDom(bizagiPage);
+  let accionDescartar = await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage);
   let subintentosDescartar = 0;
 
   while (!accionDescartar && subintentosDescartar < 2) {
     subintentosDescartar++;
-
-    let labelDescartar = bizagiPage
-      .locator('xpath=//label[contains(@for,"sidP_AccOFAC-2") and normalize-space()="Descartar"]')
-      .first();
-    if (!(await labelDescartar.isVisible().catch(() => false))) {
-      labelDescartar = bizagiPage
-        .locator('xpath=(//input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/following-sibling::label[normalize-space()="Descartar"] | //input[@type="radio" and contains(@id,"sidP_AccOFAC-2") and @value="2"]/../label[normalize-space()="Descartar"])[1]')
-        .first();
-    }
-    if (!(await labelDescartar.isVisible().catch(() => false))) {
-      labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
-    }
-
-    await labelDescartar.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-    await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
-    await labelDescartar.click({ force: true }).catch(() => {});
-
-    const inputDescartar = await labelDescartar.evaluate((label) => {
-      const lbl = label as HTMLLabelElement;
-      return (lbl.htmlFor
-        ? document.getElementById(lbl.htmlFor)
-        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]')) as HTMLInputElement | null;
-    }).catch(() => null);
-
-    if (inputDescartar) {
-      await labelDescartar.evaluate((label) => {
-        const lbl = label as HTMLLabelElement;
-        const input = lbl.htmlFor
-          ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-          : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-        const fireMouse = (el: HTMLElement | null) => {
-          if (!el) return;
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-        };
-        fireMouse(lbl);
-        fireMouse(input);
-        if (input) {
-          input.checked = true;
-          input.setAttribute('checked', 'checked');
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          input.dispatchEvent(new Event('blur', { bubbles: true }));
-        }
-      }).catch(() => {});
-    }
-
-    await bizagiPage.waitForTimeout(600);
-
-    accionDescartar = await labelDescartar.evaluate((label) => {
-      const lbl = label as HTMLLabelElement;
-      const input = lbl.htmlFor
-        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-      const className = `${lbl.className || ''} ${input?.className || ''}`;
-      return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
-    }).catch(() => false);
+    accionDescartar = await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage);
   }
 
   if (!accionDescartar) {
@@ -2478,7 +2515,20 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
   const startTime = Date.now();
   const timeout = 8000;
   const pollMs = 300;
-  let intentoRevalidarDescartar = 0;
+  let placeholderDesde = 0;
+  let ultimoRedisparo = 0;
+
+  const reDispararSecuencia = async (motivo: 'placeholder' | 'confirmar' | 'sin-validas') => {
+    if (motivo === 'placeholder') {
+      console.log('[OFAC][Motivo] Solo placeholder detectado; re-disparando Confirmar -> Descartar');
+    } else if (motivo === 'confirmar') {
+      console.log('[OFAC][Motivo] Opciones de Confirmar detectadas; re-disparando Confirmar -> Descartar');
+    }
+    ultimoRedisparo = Date.now();
+    await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage).catch(() => false);
+    await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
+    await comboMotivo.click({ force: true }).catch(() => {});
+  };
 
   while (Date.now() - startTime < timeout) {
     await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
@@ -2494,6 +2544,8 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
 
     if (hayOpciones) {
       let tieneOpcionValida = false;
+      let soloPlaceholder = true;
+      let opcionesConfirmar = false;
       const total = await opciones.count().catch(() => 0);
       const textosVisibles: string[] = [];
 
@@ -2506,6 +2558,12 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
         if (/coincidencia\s+descartada/i.test(texto) && /no\s+corresponderse/i.test(texto)) {
           tieneOpcionValida = true;
         }
+        if (!/^[-\s]+$/.test(texto)) {
+          soloPlaceholder = false;
+        }
+        if (/individuo\s+en\s+listas\s+de\s+control\s+internacionales/i.test(texto)) {
+          opcionesConfirmar = true;
+        }
       }
 
       console.log(`[OFAC][Motivo][Diag] opciones visibles=${JSON.stringify(textosVisibles)}`);
@@ -2517,33 +2575,34 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
         await bizagiPage.waitForTimeout(250);
         return true;
       }
+
+      if (soloPlaceholder) {
+        if (!placeholderDesde) placeholderDesde = Date.now();
+        if (Date.now() - placeholderDesde >= 1500 && Date.now() - ultimoRedisparo >= 900) {
+          await bizagiPage.keyboard.press('Escape').catch(() => {});
+          await reDispararSecuencia('placeholder');
+          placeholderDesde = 0;
+          continue;
+        }
+      } else {
+        placeholderDesde = 0;
+      }
+
+      if (opcionesConfirmar && Date.now() - ultimoRedisparo >= 900) {
+        await bizagiPage.keyboard.press('Escape').catch(() => {});
+        await reDispararSecuencia('confirmar');
+        continue;
+      }
+
+      if (!tieneOpcionValida && Date.now() - ultimoRedisparo >= 1500) {
+        await bizagiPage.keyboard.press('Escape').catch(() => {});
+        await reDispararSecuencia('sin-validas');
+        continue;
+      }
     }
 
     await bizagiPage.keyboard.press('Escape').catch(() => {});
-
-    if (intentoRevalidarDescartar < 2 && Date.now() - startTime < 5000) {
-      const labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
-      if (await labelDescartar.isVisible().catch(() => false)) {
-        intentoRevalidarDescartar++;
-        await labelDescartar.click({ force: true }).catch(() => {});
-        await labelDescartar.evaluate((label) => {
-          const lbl = label as HTMLLabelElement;
-          const input = lbl.htmlFor
-            ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-            : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-          if (input) {
-            input.checked = true;
-            input.setAttribute('checked', 'checked');
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.dispatchEvent(new Event('blur', { bubbles: true }));
-          }
-        }).catch(() => {});
-        await bizagiPage.waitForTimeout(600);
-      }
-    } else {
-      await bizagiPage.waitForTimeout(pollMs);
-    }
+    await bizagiPage.waitForTimeout(pollMs);
   }
 
   console.log('[OFAC] No se encontraron opciones válidas de descarte después de 8 segundos');
@@ -2551,57 +2610,7 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
 }
 
 async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<void> {
-  const labelConfirmarDom = bizagiPage
-    .locator('xpath=//label[normalize-space()="Confirmar"]')
-    .first();
-  const confirmarEnDom = await labelConfirmarDom.count().then((n) => n > 0).catch(() => false);
-
-  if (confirmarEnDom) {
-    await labelConfirmarDom.scrollIntoViewIfNeeded().catch(() => {});
-    await labelConfirmarDom.click({ force: true }).catch(() => {});
-    await labelConfirmarDom.evaluate((label) => {
-      const lbl = label as HTMLLabelElement;
-      const input = lbl.htmlFor
-        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-        : lbl.closest('span, div')?.querySelector('input[type="radio"]') as HTMLInputElement | null;
-      const fireMouse = (el: HTMLElement | null) => {
-        if (!el) return;
-        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      };
-      fireMouse(lbl);
-      fireMouse(input);
-      if (input) {
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('blur', { bubbles: true }));
-      }
-    }).catch(() => {});
-    await bizagiPage.waitForTimeout(500);
-  } else {
-    console.log('[OFAC] Confirmar no existe en DOM; re-disparando Descartar');
-  }
-
-  const labelDescartar = bizagiPage.locator('label').filter({ hasText: /^Descartar$/i }).first();
-  if (await labelDescartar.isVisible().catch(() => false)) {
-    await labelDescartar.scrollIntoViewIfNeeded().catch(() => {});
-    await labelDescartar.click({ force: true }).catch(() => {});
-    await labelDescartar.evaluate((label) => {
-      const lbl = label as HTMLLabelElement;
-      const input = lbl.htmlFor
-        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
-        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="2"]') as HTMLInputElement | null;
-      if (input) {
-        input.checked = true;
-        input.setAttribute('checked', 'checked');
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('blur', { bubbles: true }));
-      }
-    }).catch(() => {});
-    await bizagiPage.waitForTimeout(1000);
-  }
+  await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage).catch(() => false);
 
   const comboMotivo = bizagiPage
     .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
@@ -2611,6 +2620,14 @@ async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<voi
 }
 
 async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
+  const bodyText = ((await bizagiPage.locator('body').innerText({ timeout: 2000 }).catch(() => '')) || '');
+  const tienePlaft = /PLAFT|Lexis\s*Nexis|Falso\s+Positivo|Debida\s+Diligencia\s+PLAFT/i.test(bodyText);
+  const tieneOfac = /Coincidencias\s+OFAC|Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC/i.test(bodyText);
+  if (tienePlaft && !tieneOfac) {
+    console.log('[OFAC][GUARD] Pantalla visible es PLAFT/Lexis Nexis; no se ejecutará lógica OFAC');
+    throw new Error('[OFAC][GUARD] Pantalla visible es PLAFT/Lexis Nexis; no se ejecutará lógica OFAC');
+  }
+
   const pantalla = bizagiPage
     .locator('body')
     .filter({ hasText: /Gesti[oó]n de Coincidencias|Coincidencias OFAC|Acci[oó]n Coincidencias OFAC|Motivo Coincidencias OFAC|Solicitar Aclaraciones/i })
@@ -2828,6 +2845,235 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
 
 async function completarGestionCoincidenciasCumplimientoBizagi(bizagiPage: Page) {
   await completarOfacGestionCoincidenciasBizagi(bizagiPage);
+}
+
+async function seleccionarFalsoPositivoPlaft(bizagiPage: Page): Promise<boolean> {
+  const filasLexisSelectors = [
+    'xpath=//tr[contains(normalize-space(.),"Lexis Nexis")]',
+    'xpath=//*[self::div or self::section][contains(normalize-space(.),"Lexis Nexis") and (.//input[@role="combobox"] or .//input[contains(@class,"ui-select")] or .//select)]',
+  ];
+
+  let filasLexis = bizagiPage.locator(filasLexisSelectors[0]);
+  let totalFilasLexis = 0;
+  for (const selector of filasLexisSelectors) {
+    const candidata = bizagiPage.locator(selector);
+    const total = await candidata.count().catch(() => 0);
+    if (total > 0) {
+      filasLexis = candidata;
+      totalFilasLexis = total;
+      break;
+    }
+  }
+
+  const dropdownsVisibles = await bizagiPage
+    .locator('input[role="combobox"], input.ui-select-data, input.ui-selectmenu-value, .ui-selectmenu-btn, .ui-selectmenu-button, .ui-selectmenu-trigger')
+    .evaluateAll((elements) =>
+      elements.filter((element) => {
+        const html = element as HTMLElement;
+        return !!(html.offsetWidth || html.offsetHeight || html.getClientRects().length);
+      }).length
+    )
+    .catch(() => 0);
+  const selectsVisibles = await bizagiPage
+    .locator('select')
+    .evaluateAll((elements) =>
+      elements.filter((element) => {
+        const html = element as HTMLElement;
+        return !!(html.offsetWidth || html.offsetHeight || html.getClientRects().length);
+      }).length
+    )
+    .catch(() => 0);
+
+  const indicesFilasLexisVisibles: number[] = [];
+  for (let index = 0; index < totalFilasLexis; index++) {
+    const fila = filasLexis.nth(index);
+    if (!(await fila.isVisible().catch(() => false))) continue;
+    const textoFila = ((await fila.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+    if (!/Lexis\s*Nexis/i.test(textoFila)) continue;
+    indicesFilasLexisVisibles.push(index);
+  }
+
+  const totalFilasLexisVisibles = indicesFilasLexisVisibles.length;
+
+  if (!totalFilasLexisVisibles) {
+    const textoGestionCoincidencias = ((await bizagiPage.locator('body').innerText({ timeout: 1500 }).catch(() => '')) || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 800);
+    console.log(`[PLAFT][Diag] textoGestionCoincidencias='${textoGestionCoincidencias}'`);
+    console.log(`[PLAFT][Diag] dropdowns=${dropdownsVisibles} selects=${selectsVisibles} filasLexis=${totalFilasLexisVisibles}`);
+    throw new Error('[PLAFT][CRITICO] No se encontraron dropdowns Acción en filas Lexis Nexis');
+  }
+
+  console.log(`[PLAFT][Accion] filas Lexis Nexis visibles=${totalFilasLexisVisibles}`);
+
+  let filasSeleccionadas = 0;
+  for (const index of indicesFilasLexisVisibles) {
+    const fila = filasLexis.nth(index);
+    const numeroFila = filasSeleccionadas + 1;
+    const selectNativo = fila.locator('select').first();
+    const comboInput = fila.locator('input[role="combobox"], input.ui-select-data, input.ui-selectmenu-value').first();
+    const comboTrigger = fila.locator('.ui-selectmenu-btn, .ui-selectmenu-button, .ui-selectmenu-trigger, .ui-dropdown-trigger, [aria-haspopup="listbox"]').first();
+
+    console.log(`[PLAFT][Accion] fila ${numeroFila} abriendo dropdown Acción`);
+    await fila.scrollIntoViewIfNeeded().catch(() => {});
+
+    let seleccionado = false;
+    if (await selectNativo.isVisible().catch(() => false)) {
+      await selectNativo.selectOption({ label: 'Falso Positivo' }).catch(() => {});
+      await bizagiPage.waitForTimeout(250);
+      const valor = ((await selectNativo.inputValue().catch(() => '')) || '').trim();
+      seleccionado = /falso\s+positivo/i.test(valor);
+    } else {
+      for (let intento = 1; intento <= 4 && !seleccionado; intento++) {
+        if (await comboInput.isVisible().catch(() => false)) {
+          await comboInput.scrollIntoViewIfNeeded().catch(() => {});
+          await comboInput.click({ force: true }).catch(() => {});
+          await comboInput.focus().catch(() => {});
+        }
+        if (await comboTrigger.isVisible().catch(() => false)) {
+          await comboTrigger.click({ force: true }).catch(() => {});
+        } else if (await comboInput.isVisible().catch(() => false)) {
+          await comboInput.press('ArrowDown').catch(() => {});
+        }
+
+        const panelId = (await comboInput.getAttribute('aria-controls').catch(() => null))
+          || (await comboTrigger.getAttribute('aria-controls').catch(() => null));
+        const opciones = panelId
+          ? bizagiPage.locator(`#${panelId} li, #${panelId} [role="option"]`)
+          : bizagiPage.locator('div.ui-select-dropdown.open li[role="option"], div.ui-select-dropdown.open .ui-selectmenu-item, [role="listbox"] li[role="option"], .ui-selectmenu-menu:visible li');
+        const opcionExacta = opciones.filter({ hasText: /^Falso\s+Positivo$/i }).first();
+        const opcionVisible = await opcionExacta.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
+        if (!opcionVisible) {
+          await bizagiPage.keyboard.press('Escape').catch(() => {});
+          await bizagiPage.waitForTimeout(200);
+          continue;
+        }
+
+        await opcionExacta.click({ force: true }).catch(() => {});
+        await bizagiPage.waitForTimeout(300);
+
+        const valorInput = ((await comboInput.inputValue().catch(() => '')) || '').trim();
+        const textoFilaFinal = ((await fila.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+        seleccionado = /falso\s+positivo/i.test(valorInput) || /falso\s+positivo/i.test(textoFilaFinal);
+      }
+    }
+
+    console.log(`[PLAFT][Accion] fila ${numeroFila} Falso Positivo seleccionado=${seleccionado}`);
+    if (!seleccionado) {
+      throw new Error(`[PLAFT][CRITICO] No se pudo seleccionar 'Falso Positivo' en la fila ${numeroFila} de Lexis Nexis.`);
+    }
+    filasSeleccionadas++;
+  }
+
+  if (!filasSeleccionadas) {
+    const textoGestionCoincidencias = ((await bizagiPage.locator('body').innerText({ timeout: 1500 }).catch(() => '')) || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 800);
+    console.log(`[PLAFT][Diag] textoGestionCoincidencias='${textoGestionCoincidencias}'`);
+    console.log(`[PLAFT][Diag] dropdowns=${dropdownsVisibles} selects=${selectsVisibles} filasLexis=${totalFilasLexisVisibles}`);
+    throw new Error('[PLAFT][CRITICO] No se encontraron dropdowns Acción en filas Lexis Nexis');
+  }
+
+  return filasSeleccionadas === totalFilasLexisVisibles;
+}
+
+async function seleccionarNoSolicitarAclaracionesPlaft(bizagiPage: Page): Promise<void> {
+  const textoAclaraciones = bizagiPage.getByText(/Solicitar Aclaraciones/i).first();
+  const visible = await textoAclaraciones.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
+  console.log(`[PLAFT] Solicitar Aclaraciones visible=${visible}`);
+  if (!visible) return;
+
+  const bloqueAclaraciones = bizagiPage
+    .locator('xpath=//*[contains(normalize-space(.),"Solicitar Aclaraciones") or contains(normalize-space(.),"Solicitar Aclaraciones?")]/ancestor::*[self::div or self::section or self::fieldset or self::form][1]')
+    .first();
+  let labelNo = bloqueAclaraciones.locator('label').filter({ hasText: /^No$/i }).first();
+  let radioNo = bloqueAclaraciones.locator('input[type="radio"][value="false"]').first();
+
+  if (!(await labelNo.isVisible().catch(() => false))) {
+    labelNo = bizagiPage.locator('xpath=(//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/following::label[normalize-space()="No"])[1]').first();
+  }
+  if (!(await radioNo.isVisible().catch(() => false))) {
+    radioNo = bizagiPage.locator('xpath=(//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/following::input[@type="radio" and @value="false"])[1]').first();
+  }
+
+  if (await labelNo.isVisible().catch(() => false)) {
+    await labelNo.scrollIntoViewIfNeeded().catch(() => {});
+    await labelNo.click({ force: true }).catch(() => {});
+  } else if (await radioNo.isVisible().catch(() => false)) {
+    await radioNo.scrollIntoViewIfNeeded().catch(() => {});
+    await radioNo.check({ force: true }).catch(async () => {
+      await radioNo.click({ force: true }).catch(() => {});
+    });
+  }
+
+  if (!(await radioNo.isChecked().catch(() => false)) && await labelNo.isVisible().catch(() => false)) {
+    await labelNo.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+      if (!input) return;
+      input.checked = true;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }).catch(() => {});
+  }
+
+  const seleccionado = await radioNo.isChecked().catch(async () => {
+    return labelNo.evaluate((label) => {
+      const lbl = label as HTMLLabelElement;
+      const input = lbl.htmlFor
+        ? document.getElementById(lbl.htmlFor) as HTMLInputElement | null
+        : lbl.closest('span, div')?.querySelector('input[type="radio"][value="false"]') as HTMLInputElement | null;
+      const className = `${lbl.className || ''} ${input?.className || ''}`;
+      return !!input?.checked || /checked|ui-radio-state-checked/i.test(className);
+    }).catch(() => false);
+  });
+  console.log(`[PLAFT] Solicitar Aclaraciones No seleccionado=${seleccionado}`);
+  if (!seleccionado) {
+    throw new Error("[PLAFT][CRITICO] No se pudo seleccionar 'No' en Solicitar Aclaraciones.");
+  }
+}
+
+async function clickSiguientePlaft(bizagiPage: Page): Promise<void> {
+  const btnSiguiente = bizagiPage.getByRole('button', { name: /Siguiente/i }).first();
+  await btnSiguiente.waitFor({ state: 'visible', timeout: 5000 });
+  const enabled = await btnSiguiente.isEnabled().catch(() => false);
+  if (!enabled) {
+    throw new Error("[PLAFT][CRITICO] Botón 'Siguiente' no disponible.");
+  }
+  await btnSiguiente.scrollIntoViewIfNeeded().catch(() => {});
+  await btnSiguiente.click({ force: true }).catch(() => {});
+  console.log('[PLAFT] Click en Siguiente');
+
+  const btnAceptar = bizagiPage.getByRole('button', { name: /^Aceptar$/i }).first();
+  const aparecioConfirmacion = await btnAceptar.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
+  if (aparecioConfirmacion) {
+    await btnAceptar.click({ force: true }).catch(() => {});
+  }
+
+  await bizagiPage.waitForLoadState('domcontentloaded').catch(() => {});
+  await bizagiPage.waitForTimeout(1200);
+}
+
+async function completarVerificarPlaftBizagi(bizagiPage: Page) {
+  console.log('[PLAFT] Pantalla PLAFT/Lexis Nexis detectada');
+
+  const pantalla = bizagiPage
+    .locator('body')
+    .filter({ hasText: /PLAFT|Lexis\s*Nexis|Debida\s+Diligencia\s+PLAFT|Falso\s+Positivo|Acci[oó]n/i })
+    .first();
+  await pantalla.waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+
+  console.log('[PLAFT] Seleccionando resultado: Falso Positivo');
+  const falsoPositivoSeleccionado = await seleccionarFalsoPositivoPlaft(bizagiPage);
+  console.log(`[PLAFT] Falso Positivo seleccionado=${falsoPositivoSeleccionado}`);
+
+  await seleccionarNoSolicitarAclaracionesPlaft(bizagiPage);
+  await clickSiguientePlaft(bizagiPage);
+  console.log('[PLAFT] Gestión PLAFT completada');
 }
 
 async function pantallaCumplimientoAbiertaEstricaBizagi(bizagiPage: Page) {
@@ -3234,6 +3480,196 @@ export async function abrirSolicitudCumplimientoEnBizagiDesdePortal(
     }
     await abrirSolicitudCumplimientoBizagiRapido(bizagiPage, mpn);
     await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+  }
+
+  await portalPage.bringToFront().catch(() => {});
+  return { mpn, bizagiPage };
+}
+
+export async function abrirSolicitudPlaftEnBizagiDesdePortal(
+  portalPage: Page,
+  opts: { url?: string; usuario?: string; password?: string } = {}
+) {
+  const mpn = await resolverMpnDesdePortal(portalPage);
+  if (!mpn) {
+    console.log(`[PLAFT] Visible, pero no se pudo capturar el numero MPN. url=${portalPage.url()}`);
+    return null;
+  }
+
+  const bizagiUrl = resolverBizagiUrl(opts.url);
+  const bizagiUsuario = opts.usuario ?? process.env.BIZAGI_USER ?? 'domain\\admon';
+  const bizagiPassword = opts.password ?? process.env.BIZAGI_PASS;
+
+  let bizagiPage: Page | null = null;
+  for (const candidata of portalPage.context().pages()) {
+    if (candidata === portalPage) continue;
+    if (!candidata.url().includes('bizagi.com')) continue;
+    bizagiPage = candidata;
+    break;
+  }
+
+  if (!bizagiPage) {
+    console.log(`[PLAFT] No hay pestaña Bizagi reutilizable; creando nueva página`);
+    bizagiPage = await portalPage.context().newPage();
+    await bizagiPage.goto(bizagiUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await entrarABizagiSiHayLoginRobusto(bizagiPage, bizagiUsuario, bizagiPassword);
+  } else {
+    await bizagiPage.bringToFront().catch(() => {});
+    console.log(`[PLAFT] Reutilizando pestaña Bizagi existente para ${mpn}`);
+  }
+
+  if (!bizagiPage) {
+    throw new Error(`[PLAFT][CRITICO] No se pudo obtener página Bizagi válida para ${mpn}`);
+  }
+
+  const yaEnPantallaPlaft = await bizagiPage
+    .getByText(/Verificar PLAFT|Debida Diligencia PLAFT|Lexis\s*Nexis/i)
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  if (yaEnPantallaPlaft) {
+    console.log('[PLAFT] Pestaña existente ya en pantalla PLAFT; ejecutando handler');
+    await completarVerificarPlaftBizagi(bizagiPage);
+  } else {
+    const casoEncontrado = await buscarCasoPorMpnEnBizagi(bizagiPage, mpn, { useAdminFallback: true, openIfFound: true });
+    if (!casoEncontrado) {
+      throw new Error(`[PLAFT][CRITICO] No se encontró ninguna fila en Bizagi para '${mpn}'.`);
+    }
+
+    const filasInbox = bizagiPage
+      .locator('table#ui-bizagi-wp-app-inbox-grid-cases tbody tr[data-idworkflow]:visible');
+
+    const filasMpn = filasInbox.filter({ hasText: new RegExp(mpn, 'i') });
+    const totalCandidatas = await filasMpn.count().catch(() => 0);
+    console.log(`[PLAFT][Bizagi] filas candidatas para ${mpn} = ${totalCandidatas}`);
+
+    type CandidataPlaft = { origen: string; fila: Locator };
+    const candidatasPlaft: CandidataPlaft[] = [
+      {
+        origen: 'Verificar PLAFT',
+        fila: filasMpn
+          .filter({ hasText: /Solicitud MultiProducto Persona Natural/i })
+          .filter({ hasText: /Verificar PLAFT/i })
+          .first(),
+      },
+      {
+        origen: 'Verificar PLAFT (sin proceso)',
+        fila: filasMpn.filter({ hasText: /Verificar PLAFT/i }).first(),
+      },
+      {
+        origen: 'Gestión Debida Diligencia PLAFT',
+        fila: filasMpn.filter({ hasText: /Debida Diligencia PLAFT/i }).first(),
+      },
+      {
+        origen: 'Lexis Nexis',
+        fila: filasMpn.filter({ hasText: /Lexis\s*Nexis/i }).first(),
+      },
+    ];
+
+    let filaElegida: Locator | null = null;
+    let origenElegido = '';
+    for (const candidata of candidatasPlaft) {
+      if (!(await candidata.fila.isVisible().catch(() => false))) continue;
+      filaElegida = candidata.fila;
+      origenElegido = candidata.origen;
+      break;
+    }
+
+    if (!filaElegida) {
+      throw new Error(`[PLAFT][CRITICO] No se encontró fila PLAFT abrible en Bizagi para '${mpn}'.`);
+    }
+
+    const textoFila = ((await filaElegida.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    console.log(`[PLAFT][Bizagi] fila[0] texto='${textoFila}'`);
+    console.log(`[PLAFT][Bizagi] seleccionando primera fila ${origenElegido}`);
+    await filaElegida.scrollIntoViewIfNeeded().catch(() => {});
+
+    const xpathTextoMpn = `contains(normalize-space(translate(., ' ', ' ')), '${mpn}')`;
+    const spanNumeroCaso = filaElegida.locator(
+      `xpath=.//td[contains(@class,'RadNumber')]//span[contains(@class,'ui-bizagi-wp-app-inbox-activity-name') and ${xpathTextoMpn}]`
+    ).first();
+    const celdaNumeroCaso = filaElegida.locator(
+      `xpath=.//td[contains(@class,'RadNumber') and .//span[${xpathTextoMpn}]]`
+    ).first();
+    const linkAlternoMpn = filaElegida
+      .locator(`xpath=.//*[self::span or self::a or self::td][${xpathTextoMpn}]`)
+      .first();
+    const textoExactoMpn = filaElegida.getByText(new RegExp(`^${mpn}$`, 'i')).first();
+
+    const objetivoClick = (await spanNumeroCaso.isVisible().catch(() => false))
+      ? spanNumeroCaso
+      : (await celdaNumeroCaso.isVisible().catch(() => false))
+        ? celdaNumeroCaso
+        : (await textoExactoMpn.isVisible().catch(() => false))
+          ? textoExactoMpn
+          : linkAlternoMpn;
+
+    if (!(await objetivoClick.isVisible().catch(() => false))) {
+      throw new Error(`[PLAFT][CRITICO] No se localizó número de caso ${mpn} dentro de fila ${origenElegido}.`);
+    }
+
+    await objetivoClick.scrollIntoViewIfNeeded().catch(() => {});
+    console.log(`[PLAFT][Bizagi] click en número de caso ${mpn} dentro de fila ${origenElegido}`);
+    console.log('[PLAFT][Bizagi] esperando pantalla editable Verificar PLAFT');
+
+    const detectarEditable = async (intento: number): Promise<boolean> => {
+      const falsoPositivo = await bizagiPage.getByText(/Falso\s+Positivo/i).first().isVisible().catch(() => false);
+      const listas = await bizagiPage.getByText(/Listas\s*Lexis\s*Nexis/i).first().isVisible().catch(() => false);
+      const combos = await bizagiPage.locator('input[role="combobox"]:visible, input.ui-select-data:visible').count().catch(() => 0);
+      const radios = await bizagiPage.locator('input[type="radio"]:visible').count().catch(() => 0);
+      const siguiente = await bizagiPage.getByRole('button', { name: /Siguiente/i }).first().isVisible().catch(() => false);
+      console.log(`[PLAFT][Bizagi] editable intento ${intento} falsoPositivo=${falsoPositivo} listas=${listas} combos=${combos} radios=${radios} siguiente=${siguiente}`);
+      if (falsoPositivo) return true;
+      if (listas && (combos >= 1 || radios >= 1 || siguiente)) return true;
+      if (combos >= 1 || radios >= 1) return true;
+      return siguiente && listas;
+    };
+
+    const acciones: Array<() => Promise<void>> = [
+      async () => { await objetivoClick.click(); },
+      async () => { await objetivoClick.dblclick(); },
+      async () => {
+        const box = await objetivoClick.boundingBox();
+        if (!box) throw new Error('sin bounding box');
+        await bizagiPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      },
+      async () => {
+        const box = await objetivoClick.boundingBox();
+        if (!box) throw new Error('sin bounding box');
+        await bizagiPage.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+      },
+      async () => {
+        await objetivoClick.evaluate((el) => {
+          const h = el as HTMLElement;
+          h.focus?.();
+          h.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          h.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          h.click?.();
+          h.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+        });
+      },
+    ];
+
+    let editable = false;
+    let intento = 0;
+    for (const accion of acciones) {
+      intento++;
+      await accion().catch(() => {});
+      const inicio = Date.now();
+      while (Date.now() - inicio < 4500) {
+        if (await detectarEditable(intento)) { editable = true; break; }
+        await bizagiPage.waitForTimeout(300);
+      }
+      if (editable) break;
+    }
+
+    if (!editable) {
+      throw new Error('[PLAFT][CRITICO] No se abrió pantalla editable Verificar PLAFT después de click en número de caso');
+    }
+
+    console.log('[PLAFT][Bizagi] pantalla Verificar PLAFT editable=true');
+    await completarVerificarPlaftBizagi(bizagiPage);
   }
 
   await portalPage.bringToFront().catch(() => {});

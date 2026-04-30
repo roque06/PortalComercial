@@ -20,6 +20,7 @@ import {
     marcarCedulasProcesadasEnExcel,
     cancelarCasoEnBizagiDesdePortal,
     abrirSolicitudCumplimientoEnBizagiDesdePortal,
+    abrirSolicitudPlaftEnBizagiDesdePortal,
     extraerCasoActivoMpn,
     seleccionarInstrumentoRobusto,
     seleccionarDropdownPorCampo,
@@ -611,33 +612,116 @@ async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string)
     throw new Error(`[CRITICO] No se confirmo el estado 'Aprobado' en portal luego de gestionar Cumplimiento${mpn ? ` para ${mpn}` : ''}.`);
 }
 
-async function procesarVerificacionesEspeciales(page: Page) {
+type BloqueVerificacion = { presente: boolean; lista: string; estado: string; metodo: string };
+
+async function detectarBloquesVerificaciones(page: Page) {
     const badgeCumplimientoVisible = await page
         .getByText(/Verificaciones\s*-\s*Cumplimiento/i)
         .first()
         .isVisible()
         .catch(() => false);
-    const plaftVisible = await page
-        .getByText(/PLAFT|Prevenci(?:o|\u00f3)n.*Lavado|Lavado de Activos/i)
-        .first()
-        .isVisible()
-        .catch(() => false);
-    const verificacionesDetectadas = badgeCumplimientoVisible || plaftVisible;
 
-    console.log(`[Verificaciones] Pantalla/badge de verificaciones detectado=${verificacionesDetectadas}`);
-    console.log(`[Verificaciones] OFAC detectado=${badgeCumplimientoVisible}`);
-    console.log(`[Verificaciones] PLAFT detectado=${plaftVisible}`);
-    console.log(`[Cumplimiento] badgeVisible=${badgeCumplimientoVisible} url=${page.url()}`);
+    const estadoPendienteRegex = /En\s+espera|Pendiente|En\s+proceso|En\s+revisi[oó]n/i;
+    const estadoCualquieraRegex = /En\s+espera|Pendiente|En\s+proceso|En\s+revisi[oó]n|Aprobad[oa]|Rechazad[oa]|Completad[oa]/i;
 
-    if (plaftVisible && !badgeCumplimientoVisible) {
-        const etapaKey = page.url().split('/').pop() || 'unknown';
-        if (!plaftsSinManejadorLogueadas.has(etapaKey)) {
-            plaftsSinManejadorLogueadas.add(etapaKey);
-            console.log('[Verificaciones][WARN] PLAFT detectado pero no existe manejador implementado; se continuará flujo normal');
+    const evaluarTexto = (texto: string, listaRegex: RegExp) => {
+        const limpio = (texto || '').replace(/\s+/g, ' ').trim();
+        const matchLista = limpio.match(listaRegex);
+        const matchEstado = limpio.match(estadoCualquieraRegex);
+        const estado = matchEstado ? matchEstado[0] : '';
+        const pendiente = !!matchLista && estadoPendienteRegex.test(estado);
+        return { lista: matchLista ? matchLista[0] : '', estado, pendiente };
+    };
+
+    const evaluarPorFila = async (listaRegex: RegExp): Promise<BloqueVerificacion> => {
+        const fila = page
+            .locator('tr, li, [class*="row"], [class*="list-item"]')
+            .filter({ hasText: listaRegex })
+            .first();
+        const visible = await fila.isVisible().catch(() => false);
+        if (!visible) return { presente: false, lista: '', estado: '', metodo: '' };
+        const texto = (await fila.innerText().catch(() => '')) || '';
+        const r = evaluarTexto(texto, listaRegex);
+        return { presente: r.pendiente, lista: r.lista, estado: r.estado, metodo: r.pendiente ? 'fila' : '' };
+    };
+
+    const evaluarPorPanel = async (anclaRegex: RegExp, listaRegex: RegExp): Promise<BloqueVerificacion> => {
+        const ancla = page.getByText(anclaRegex).first();
+        if (!(await ancla.isVisible().catch(() => false))) return { presente: false, lista: '', estado: '', metodo: '' };
+
+        const ancestrosXpath =
+            "xpath=ancestor::*[self::div or self::section or self::fieldset or self::article" +
+            " or contains(@class,'p-card') or contains(@class,'panel') or contains(@class,'verificacion') or contains(@class,'card')][position()<=6]";
+        const ancestros = ancla.locator(ancestrosXpath);
+        const total = await ancestros.count().catch(() => 0);
+        for (let i = 0; i < total; i++) {
+            const candidato = ancestros.nth(i);
+            const visibleAnc = await candidato.isVisible().catch(() => false);
+            if (!visibleAnc) continue;
+            const texto = (await candidato.innerText().catch(() => '')) || '';
+            const r = evaluarTexto(texto, listaRegex);
+            if (r.pendiente) {
+                return { presente: true, lista: r.lista, estado: r.estado, metodo: 'panel' };
+            }
         }
+
+        const contenedor = ancla.locator('xpath=ancestor::*[self::div or self::section or self::fieldset or self::article][1]').first();
+        if (await contenedor.isVisible().catch(() => false)) {
+            const texto = (await contenedor.innerText().catch(() => '')) || '';
+            const r = evaluarTexto(texto, listaRegex);
+            if (r.pendiente) {
+                return { presente: true, lista: r.lista, estado: r.estado, metodo: 'ancla' };
+            }
+        }
+
+        return { presente: false, lista: '', estado: '', metodo: '' };
+    };
+
+    const evaluarBloque = async (anclaRegex: RegExp, listaRegex: RegExp): Promise<BloqueVerificacion> => {
+        const porFila = await evaluarPorFila(listaRegex);
+        if (porFila.presente) return porFila;
+        return evaluarPorPanel(anclaRegex, listaRegex);
+    };
+
+    const ofacBloque = await evaluarBloque(/\bOFAC\b/i, /Listas\s*OFAC|Coincidencias\s*OFAC|OFAC/i);
+    const plaftBloque = await evaluarBloque(/\bPLAFT\b/i, /Listas\s*Lexis\s*Nexis|Lexis\s*Nexis|Debida\s+Diligencia\s+PLAFT/i);
+
+    let textoVerificacionesFallback = '';
+    if (badgeCumplimientoVisible && !ofacBloque.presente && !plaftBloque.presente) {
+        const cardVerificaciones = page
+            .locator('xpath=//*[contains(normalize-space(.),"Verificaciones")]/ancestor-or-self::*[self::div or self::section or self::article or contains(@class,"p-card") or contains(@class,"panel") or contains(@class,"card")][1]')
+            .first();
+        let crudo = '';
+        if (await cardVerificaciones.isVisible().catch(() => false)) {
+            crudo = (await cardVerificaciones.innerText().catch(() => '')) || '';
+        }
+        if (!crudo) {
+            crudo = (await page.locator('body').innerText({ timeout: 1500 }).catch(() => '')) || '';
+        }
+        textoVerificacionesFallback = crudo.replace(/\s+/g, ' ').trim().slice(0, 500);
     }
 
-    if (!badgeCumplimientoVisible) {
+    return { badgeCumplimientoVisible, ofacBloque, plaftBloque, textoVerificacionesFallback };
+}
+
+async function procesarVerificacionesEspeciales(page: Page) {
+    const { badgeCumplimientoVisible, ofacBloque, plaftBloque, textoVerificacionesFallback } = await detectarBloquesVerificaciones(page);
+    const ofacPendiente = ofacBloque.presente;
+    const plaftPendiente = plaftBloque.presente;
+    const verificacionesDetectadas = badgeCumplimientoVisible || ofacPendiente || plaftPendiente;
+
+    console.log(`[Verificaciones] Pantalla/badge de verificaciones detectado=${verificacionesDetectadas}`);
+    console.log(
+        `[Verificaciones][Diag] bloques visibles: PLAFT=${plaftPendiente} lista='${plaftBloque.lista}' estado='${plaftBloque.estado}' metodo='${plaftBloque.metodo}' OFAC=${ofacPendiente} lista='${ofacBloque.lista}' estado='${ofacBloque.estado}' metodo='${ofacBloque.metodo}'`
+    );
+    if (badgeCumplimientoVisible && !ofacPendiente && !plaftPendiente && textoVerificacionesFallback) {
+        console.log(`[Verificaciones][Diag][Fallback] textoVerificaciones='${textoVerificacionesFallback}'`);
+    }
+    console.log(`[Verificaciones] OFAC detectado=${ofacPendiente}`);
+    console.log(`[Verificaciones] PLAFT detectado=${plaftPendiente}`);
+    console.log(`[Cumplimiento] badgeVisible=${badgeCumplimientoVisible} url=${page.url()}`);
+
+    if (!ofacPendiente && !plaftPendiente) {
         const verificacionBpm = await abrirBpmSiVerificacionConoceCliente(page).catch((e) => {
             console.log(`[Verificacion][WARN] ${e instanceof Error ? e.message : String(e)}`);
             return null;
@@ -651,7 +735,9 @@ async function procesarVerificacionesEspeciales(page: Page) {
         return null;
     }
 
-    console.log('[Verificaciones] Resolviendo OFAC');
+    if (ofacPendiente && plaftPendiente) {
+        console.log('[Verificaciones][WARN] OFAC y PLAFT pendientes; se resolverá por rutas separadas');
+    }
 
     const mpnVisible = await page
         .locator('span.p-tag-value')
@@ -661,6 +747,30 @@ async function procesarVerificacionesEspeciales(page: Page) {
         .then((v) => (v || '').trim().toUpperCase())
         .catch(() => '');
 
+    if (plaftPendiente && !ofacPendiente) {
+        console.log('[Verificaciones] Resolviendo PLAFT');
+        console.log(`[Cumplimiento] mpnVisible='${mpnVisible}'`);
+        const verificacionPlaft = await abrirSolicitudPlaftEnBizagiDesdePortal(page, {
+            password: BIZAGI_PASSWORD,
+        }).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[PLAFT\]\[CRITICO\]|\[OFAC\]\[GUARD\]/.test(msg)) {
+                throw e;
+            }
+            console.log(`[PLAFT][WARN] ${msg}`);
+            return null;
+        });
+        if (verificacionPlaft?.mpn) {
+            const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionPlaft.mpn);
+            console.log(`[PLAFT] Caso resuelto en Bizagi para: ${verificacionPlaft.mpn}`);
+            console.log('[Verificaciones] PLAFT requerido aprobado=true');
+            console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
+            return { tipo: 'cumplimiento' as const, mpn: verificacionPlaft.mpn, estado };
+        }
+        throw new Error('[PLAFT][CRITICO] PLAFT detectado pero no se pudo resolver el caso en Bizagi');
+    }
+
+    console.log('[Verificaciones] Resolviendo OFAC');
     console.log(`[Cumplimiento] mpnVisible='${mpnVisible}'`);
 
     if (mpnVisible && cumplimientoMpnsProcesados.has(mpnVisible)) {
@@ -672,7 +782,11 @@ async function procesarVerificacionesEspeciales(page: Page) {
     const verificacionCumplimiento = await abrirSolicitudCumplimientoEnBizagiDesdePortal(page, {
         password: BIZAGI_PASSWORD,
     }).catch((e) => {
-        console.log(`[Cumplimiento][WARN] ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/\[OFAC\]\[GUARD\]/.test(msg)) {
+            throw e;
+        }
+        console.log(`[Cumplimiento][WARN] ${msg}`);
         return null;
     });
     if (verificacionCumplimiento?.mpn) {
@@ -1500,58 +1614,37 @@ if (productoYaAgregado) {
                         const despuesOk = !!seccion && !(seccion === null);
                         console.log(`[Producto][Legacy][Trace] despues de localizeSeccionProductosLegacySeguro ok=${despuesOk} timeout=${tiempoAgotado}`);
 
-                        // Fallback: usar body como scope temporal si no se localizó
-                        if (!seccion) {
-                            console.log('[Producto][Legacy][FallbackScope] no se localizó seccionProductos, usando fallback');
-                            const todosDropdowns = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
-                            const dropdownsGlobales = await todosDropdowns.count().catch(() => 0);
-                            console.log(`[Producto][Legacy][FallbackScope] dropdownsGlobales=${dropdownsGlobales}`);
-                            if (dropdownsGlobales >= 2) {
-                                seccion = page.locator('body');
-                                console.log('[Producto][Legacy][FallbackScope] usando body como scope temporal=true');
-                            }
-                        }
-
-                        if (!seccion) {
-                            // Fallback adicional: buscar dropdowns visibles y usar un ancestro común
-                            const primerDropdown = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').first();
-                            const padre = primerDropdown.locator('xpath=ancestor::*[self::fieldset or self::section or self::div][1]').first();
-                            const visible = await padre.isVisible().catch(() => false);
-                            if (visible) {
-                                seccion = padre;
-                                console.log('[Producto][Legacy][FallbackScope] usando ancestro común de dropdown como scope');
-                            }
-                        }
-
-                        if (!seccion) {
-                            throw new Error('[Producto][Legacy][CRITICO] No se pudo localizar sección Productos con estrategia legacy ni fallback. seccion=null');
-                        }
-
-                        const seccionVisible = await seccion.isVisible({ timeout: 1500 }).catch(() => false);
-                        console.log(`[Producto][Legacy] seccionProductos visible=${seccionVisible}`);
-
-                        const dropdownsVisibles = await seccion
-                            .locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible')
-                            .count()
-                            .catch(() => 0);
-                        console.log(`[Producto][Legacy] dropdowns visibles en seccion=${dropdownsVisibles}`);
-
                         let scopeNombre = 'legacy';
                         let usarBandaVisual = false;
                         let bandaDropdowns: { categoria: Locator; producto: Locator } | null = null;
 
-                        if (!seccionVisible || dropdownsVisibles < 2) {
-                            console.log('[Producto][Legacy][WARN] fallback no tiene dropdowns suficientes, intentando scope específico por labels');
+                        const enrutarABandaVisual = async () => {
+                            console.log('[Producto][Legacy][WARN] legacy no disponible; usando banda visual, no body');
+                            bandaDropdowns = await esperarDropdownsProductosListos(page);
+                            usarBandaVisual = true;
+                            scopeNombre = 'banda';
+                        };
 
-                            const scopoEspecifico = await localizarScopeProductosPorLabelsYDropdowns(page);
-                            if (scopoEspecifico) {
-                                seccion = scopoEspecifico;
-                                scopeNombre = 'productos';
-                            } else {
-                                // Tercer nivel: polling con banda visual (hasta 8s)
-                                bandaDropdowns = await esperarDropdownsProductosListos(page);
-                                usarBandaVisual = true;
-                                scopeNombre = 'banda';
+                        if (!seccion) {
+                            await enrutarABandaVisual();
+                        } else {
+                            const seccionVisible = await seccion.isVisible({ timeout: 1500 }).catch(() => false);
+                            console.log(`[Producto][Legacy] seccionProductos visible=${seccionVisible}`);
+
+                            const dropdownsVisibles = await seccion
+                                .locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible')
+                                .count()
+                                .catch(() => 0);
+                            console.log(`[Producto][Legacy] dropdowns visibles en seccion=${dropdownsVisibles}`);
+
+                            if (!seccionVisible || dropdownsVisibles < 2) {
+                                const scopoEspecifico = await localizarScopeProductosPorLabelsYDropdowns(page);
+                                if (scopoEspecifico) {
+                                    seccion = scopoEspecifico;
+                                    scopeNombre = 'productos';
+                                } else {
+                                    await enrutarABandaVisual();
+                                }
                             }
                         }
 
@@ -1633,7 +1726,8 @@ if (productoYaAgregado) {
                         }
 
                         // Post-selección (común a ambas rutas)
-                        await etapaSeccionProductosPostSeleccion(page, { tipoCuenta: tipoACargar, identificacion: 'TMP' } as unknown as RegistroExcel, seccion);
+                        const seccionParaPostSeleccion = seccion ?? await localizarSeccionProductos(page);
+                        await etapaSeccionProductosPostSeleccion(page, { tipoCuenta: tipoACargar, identificacion: 'TMP' } as unknown as RegistroExcel, seccionParaPostSeleccion);
 
                         const urlDespuesPostSeleccion = page.url();
                         console.log(`[Producto][Guard] despues de post-seleccion url=${urlDespuesPostSeleccion}`);
@@ -4297,6 +4391,179 @@ async function completarDireccionPostProducto(page: Page) {
         throw new Error(`[Direccion] No hay opciones validas para ${nombre}. total=${total}`);
     };
 
+    const seleccionarDireccionDependienteSecuencial = async (
+        modalDireccionScope: Locator,
+        currentPage: Page,
+        pasos: Array<{
+            nombre: string;
+            label: RegExp;
+            preferido?: RegExp;
+        }>
+    ): Promise<Record<string, string>> => {
+        const resultados: Record<string, string> = {};
+
+        const resolverDropdownDireccion = async (labelRegex: RegExp) => {
+            const { labelLoc, campo } = await resolverCampoDireccion(labelRegex);
+            const dropdown = campo.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+            const trigger = campo.locator('.p-dropdown-trigger, [data-pc-section="trigger"], .ui-selectmenu-btn, .ui-selectmenu-button, .ui-selectmenu-trigger').first();
+            const input = campo.locator('input:visible').first();
+            const boton = campo.locator('button:visible').first();
+            return { labelLoc, campo, dropdown, trigger, input, boton };
+        };
+
+        const leerValorVisualDireccion = async (labelRegex: RegExp) => {
+            const { campo, dropdown, input } = await resolverDropdownDireccion(labelRegex);
+            const labelDropdown = campo.locator('.p-dropdown-label:visible, [data-pc-section="label"]:visible').first();
+            const textoDropdown = ((await labelDropdown.innerText().catch(() => '')) || '').trim();
+            if (!valorInvalido(textoDropdown) && textoDropdown !== 'p-dropdown-label') return textoDropdown;
+
+            const textoCombobox = ((await dropdown.textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            if (!valorInvalido(textoCombobox) && !labelRegex.test(textoCombobox)) return textoCombobox;
+
+            const valorInput = ((await input.inputValue().catch(() => '')) || '').trim();
+            if (!valorInvalido(valorInput)) return valorInput;
+            return '';
+        };
+
+        const esperarDropdownListo = async (labelRegex: RegExp) => {
+            const inicio = Date.now();
+            const timeoutMs = 4000;
+            while (Date.now() - inicio < timeoutMs) {
+                const { campo, dropdown, trigger, input } = await resolverDropdownDireccion(labelRegex);
+                const className = `${await campo.getAttribute('class').catch(() => '')} ${await dropdown.getAttribute('class').catch(() => '')} ${await input.getAttribute('class').catch(() => '')}`.toLowerCase();
+                const ariaDisabled = `${await dropdown.getAttribute('aria-disabled').catch(() => '')}${await input.getAttribute('aria-disabled').catch(() => '')}`.toLowerCase();
+                const disabledAttr = `${await dropdown.getAttribute('disabled').catch(() => '')}${await input.getAttribute('disabled').catch(() => '')}`.toLowerCase();
+                const visible = await dropdown.isVisible().catch(() => false)
+                    || await trigger.isVisible().catch(() => false)
+                    || await input.isVisible().catch(() => false);
+                const loading = /loading|skeleton|spinner/.test(className);
+                const disabled = /disabled/.test(className) || ariaDisabled === 'true' || !!disabledAttr;
+                if (visible && !loading && !disabled) return true;
+                await currentPage.waitForTimeout(200);
+            }
+            return false;
+        };
+
+        const abrirYContarOpciones = async (labelRegex: RegExp) => {
+            const { labelLoc, dropdown, trigger, input, boton } = await resolverDropdownDireccion(labelRegex);
+            if (await dropdown.isVisible().catch(() => false)) {
+                await dropdown.click({ force: true, timeout: 1200 }).catch(() => { });
+            } else if (await trigger.isVisible().catch(() => false)) {
+                await trigger.click({ force: true, timeout: 1200 }).catch(() => { });
+            } else if (await input.isVisible().catch(() => false)) {
+                await input.click({ force: true, timeout: 1200 }).catch(() => { });
+            } else if (await boton.isVisible().catch(() => false)) {
+                await boton.click({ force: true, timeout: 1200 }).catch(() => { });
+            } else {
+                await labelLoc.click({ force: true }).catch(() => { });
+            }
+
+            const ariaControls = (await input.getAttribute('aria-controls').catch(() => ''))
+                || (await dropdown.getAttribute('aria-controls').catch(() => ''))
+                || (await trigger.getAttribute('aria-controls').catch(() => ''));
+            let panel = ariaControls
+                ? currentPage.locator(`#${ariaControls}`)
+                : currentPage.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open, .ui-selectmenu-menu:visible').last();
+            let panelVisible = await panel.waitFor({ state: 'visible', timeout: 1800 }).then(() => true).catch(() => false);
+            if (!panelVisible) {
+                await input.press('ArrowDown').catch(() => { });
+                panel = ariaControls
+                    ? currentPage.locator(`#${ariaControls}`)
+                    : currentPage.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open, .ui-selectmenu-menu:visible').last();
+                panelVisible = await panel.waitFor({ state: 'visible', timeout: 1200 }).then(() => true).catch(() => false);
+            }
+
+            const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"], .ui-selectmenu-item');
+            const totalOpciones = panelVisible ? await opciones.count().catch(() => 0) : 0;
+            return { panel, panelVisible, opciones, totalOpciones, input };
+        };
+
+        for (let pasoIndex = 0; pasoIndex < pasos.length; pasoIndex++) {
+            const paso = pasos[pasoIndex];
+            console.log(`[Direccion][Secuencia] ${paso.nombre} inicio`);
+
+            let valorPaso = '';
+            for (let intento = 1; intento <= 3; intento++) {
+                await modalDireccionScope.scrollIntoViewIfNeeded().catch(() => { });
+                const listo = await esperarDropdownListo(paso.label);
+                if (!listo) {
+                    if (intento >= 3) {
+                        throw new Error(`[Direccion][CRITICO] ${paso.nombre} no estuvo listo para seleccionar.`);
+                    }
+                    await currentPage.waitForTimeout(250);
+                    continue;
+                }
+
+                const { opciones, totalOpciones, panelVisible, input } = await abrirYContarOpciones(paso.label);
+                console.log(`[Direccion][Secuencia] ${paso.nombre} opciones=${totalOpciones}`);
+
+                let opcionSeleccionable: Locator | null = null;
+                let candidato = '';
+                if (panelVisible) {
+                    for (let i = 0; i < totalOpciones; i++) {
+                        const opcion = opciones.nth(i);
+                        if (!(await opcion.isVisible().catch(() => false))) continue;
+                        const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
+                        if (valorInvalido(texto)) continue;
+                        if (paso.preferido && paso.preferido.test(texto)) {
+                            opcionSeleccionable = opcion;
+                            candidato = texto;
+                            break;
+                        }
+                        if (!opcionSeleccionable) {
+                            opcionSeleccionable = opcion;
+                            candidato = texto;
+                        }
+                    }
+                }
+
+                if (!opcionSeleccionable) {
+                    await currentPage.keyboard.press('Escape').catch(() => { });
+                    if (intento >= 3) throw new Error(`[Direccion][CRITICO] ${paso.nombre} no tiene opciones válidas.`);
+                    await currentPage.waitForTimeout(250);
+                    continue;
+                }
+
+                await opcionSeleccionable.click({ force: true, timeout: 1200 }).catch(() => { });
+                await currentPage.getByText(new RegExp(`^${candidato.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, 'i')).last().click({ force: true }).catch(() => { });
+                await currentPage.keyboard.press('Enter').catch(() => { });
+                await currentPage.waitForTimeout(250);
+
+                valorPaso = await leerValorVisualDireccion(paso.label);
+                if (!valorInvalido(valorPaso)) {
+                    console.log(`[Direccion][Secuencia] ${paso.nombre} seleccionado='${valorPaso}'`);
+                    resultados[paso.nombre] = valorPaso;
+                    await currentPage.keyboard.press('Escape').catch(() => { });
+                    break;
+                }
+
+                await currentPage.keyboard.press('Escape').catch(() => { });
+                if (intento >= 3) {
+                    throw new Error(`[Direccion][CRITICO] ${paso.nombre} quedó vacío después de 3 intentos.`);
+                }
+                await currentPage.waitForTimeout(250);
+            }
+
+            const siguiente = pasos[pasoIndex + 1];
+            if (siguiente) {
+                console.log(`[Direccion][Secuencia] esperando carga de ${siguiente.nombre}`);
+                const listoSiguiente = await esperarDropdownListo(siguiente.label);
+                let opcionesSiguiente = 0;
+                if (listoSiguiente) {
+                    const apertura = await abrirYContarOpciones(siguiente.label);
+                    opcionesSiguiente = apertura.totalOpciones;
+                    await currentPage.keyboard.press('Escape').catch(() => { });
+                }
+                console.log(`[Direccion][Secuencia] ${siguiente.nombre} lista=${listoSiguiente} opciones=${opcionesSiguiente}`);
+                if (!listoSiguiente) {
+                    throw new Error(`[Direccion][CRITICO] ${siguiente.nombre} no cargó después de seleccionar ${paso.nombre}='${valorPaso}'.`);
+                }
+            }
+        }
+
+        return resultados;
+    };
+
     await llenarTextoRapido(/Calle.*Avenida.*Autopista/i, randomTexto('Calle'));
     await llenarTextoRapido(/Nombre edificio/i, randomTexto('Edificio'), false).catch(() => false);
     await llenarTextoRapido(/N[uú]mero casa.*edificio/i, String(randomInt(1, 999)));
@@ -4306,60 +4573,38 @@ async function completarDireccionPostProducto(page: Page) {
     console.log('[Direccion] País listo');
 
     // Usar estrategia de Datos Laborales que funcionan correctamente
-    console.log('[Direccion] Seleccionando Región');
-    await seleccionarDropdownEnScopePorTexto(page, modalDireccion, /^Regi(?:o|ó)n$/i, /Distrito Nacional/i, 0)
-        .catch(async () => {
-            console.log('[Direccion][Diag] Región: Distrito Nacional no encontrado, usando primer valor');
-            return seleccionarDropdownIndexEnScope(page, modalDireccion, /^Regi(?:o|ó)n$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
-        });
-    let regionValor = await leerValorRapido(/^Regi(?:o|ó)n$/i);
+    const direccionResultados = await seleccionarDireccionDependienteSecuencial(modalDireccion, page, [
+        { nombre: 'Región', label: /^Regi(?:o|ó)n$/i, preferido: /Distrito Nacional/i },
+        { nombre: 'Provincia', label: /^Provincia$/i, preferido: /Distrito Nacional/i },
+        { nombre: 'Municipio', label: /^Municipio$/i },
+        { nombre: 'Localidad', label: /^Localidad$/i },
+        { nombre: 'Sector', label: /^Sector$/i },
+    ]);
+    let regionValor = direccionResultados['Región'] || await leerValorRapido(/^Regi(?:o|ó)n$/i);
     console.log(`[Direccion] Región seleccionada rapido=true valor='${regionValor}'`);
     if (valorInvalido(regionValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Región`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Provincia');
-    await seleccionarDropdownEnScopePorTexto(page, modalDireccion, /^Provincia$/i, /Distrito Nacional/i, 0)
-        .catch(async () => {
-            console.log('[Direccion][Diag] Provincia: Distrito Nacional no encontrado, usando primer valor');
-            return seleccionarDropdownIndexEnScope(page, modalDireccion, /^Provincia$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
-        });
-    let provinciaValor = await leerValorRapido(/^Provincia$/i);
+    let provinciaValor = direccionResultados['Provincia'] || await leerValorRapido(/^Provincia$/i);
     console.log(`[Direccion] Provincia seleccionada rapido=true valor='${provinciaValor}'`);
-    if (valorInvalido(provinciaValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Provincia`);
+    if (valorInvalido(provinciaValor)) throw new Error(`[Direccion][CRITICO] Provincia quedó vacía después de seleccionar Región='${regionValor}'`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Municipio');
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Municipio$/i, 0, {
-        maxIntentos: FAST_UI ? 8 : 12,
-        timeoutMs: FAST_UI ? 4200 : 7000,
-        panelTimeoutMs: FAST_UI ? 4800 : 9000,
-        esperaEntreIntentosMs: FAST_UI ? 300 : 900,
-    });
-    let municipioValor = await leerValorRapido(/^Municipio$/i);
+    let municipioValor = direccionResultados['Municipio'] || await leerValorRapido(/^Municipio$/i);
     console.log(`[Direccion] Municipio seleccionado rapido=true valor='${municipioValor}'`);
     if (valorInvalido(municipioValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Municipio`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Localidad');
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Localidad$/i, 0, {
-        maxIntentos: FAST_UI ? 8 : 12,
-        timeoutMs: FAST_UI ? 4200 : 7000,
-        panelTimeoutMs: FAST_UI ? 4800 : 9000,
-        esperaEntreIntentosMs: FAST_UI ? 300 : 900,
-    });
-    let localidadValor = await leerValorRapido(/^Localidad$/i);
+    let localidadValor = direccionResultados['Localidad'] || await leerValorRapido(/^Localidad$/i);
     console.log(`[Direccion] Localidad seleccionada rapido=true valor='${localidadValor}'`);
     if (valorInvalido(localidadValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Localidad`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Sector');
-    await seleccionarDropdownDependienteConEspera(page, modalDireccion, /^Sector$/i, 0, {
-        maxIntentos: FAST_UI ? 7 : 10,
-        timeoutMs: FAST_UI ? 3800 : 6500,
-        panelTimeoutMs: FAST_UI ? 4400 : 8000,
-        esperaEntreIntentosMs: FAST_UI ? 260 : 800,
-    });
-    let sectorValor = await leerValorRapido(/^Sector$/i);
+    let sectorValor = direccionResultados['Sector'] || await leerValorRapido(/^Sector$/i);
     console.log(`[Direccion] Sector seleccionado rapido=true valor='${sectorValor}'`);
     if (valorInvalido(sectorValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Sector`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
@@ -6883,6 +7128,41 @@ async function esperarPantallaTallerProductos(
     return false;
 }
 
+async function esperarPostProductoNormalSinVerificaciones(page: Page): Promise<boolean> {
+    const timeoutMs = 8000;
+    const pollMs = 300;
+    const inicio = Date.now();
+    let intento = 0;
+
+    console.log('[PostProducto][Normal] Esperando pantalla post-producto después de producto confirmado');
+
+    while (Date.now() - inicio < timeoutMs) {
+        intento++;
+        const [nivel, direccion, publicidad, pep, fatca, referencia, correspondencia] = await Promise.all([
+            page.getByText(/Nivel de estudio/i).first().isVisible().catch(() => false),
+            page.getByText(/Dirección|Direccion|Añadir dirección|Anadir direccion/i).first().isVisible().catch(() => false),
+            page.getByText(/¿Acepta publicidad\?|Acepta publicidad/i).first().isVisible().catch(() => false),
+            page.getByText(/\bPEP\b/i).first().isVisible().catch(() => false),
+            page.getByText(/\bFATCA\b/i).first().isVisible().catch(() => false),
+            page.getByText(/Referencia personal/i).first().isVisible().catch(() => false),
+            page.getByText(/Correspondencia/i).first().isVisible().catch(() => false),
+        ]);
+
+        console.log(`[PostProducto][Normal] intento ${intento} señales nivel=${nivel} direccion=${direccion} publicidad=${publicidad} pep=${pep} fatca=${fatca} referencia=${referencia} correspondencia=${correspondencia}`);
+
+        const detectada = nivel || direccion || publicidad || pep || fatca || referencia || correspondencia;
+        if (detectada) {
+            console.log('[PostProducto][Normal] pantalla post-producto detectada=true');
+            return true;
+        }
+
+        await page.waitForTimeout(pollMs);
+    }
+
+    console.log('[PostProducto][Normal] pantalla post-producto detectada=false');
+    return false;
+}
+
 async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel) {
     await agregarRelacionadoSiAplica(page, registro);
     let postProductoLlenadoDesdeCumplimiento = false;
@@ -6933,6 +7213,16 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         const estadoProductoInicial = await asegurarProductoConfirmadoAntesDeContinuar(page, registro);
         if (estadoProductoInicial === 'producto-confirmado') {
             const avanceTrasProductoConfirmado = await avanzarConProductoConfirmado('producto confirmado inicial');
+            if (avanceTrasProductoConfirmado !== 'post-producto') {
+                const postProductoNormalDetectado = await esperarPostProductoNormalSinVerificaciones(page);
+                if (postProductoNormalDetectado) {
+                    console.log('[PostProducto][Normal] Iniciando llenado después de producto confirmado');
+                    const completoPostProductoNormal = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true });
+                    if (completoPostProductoNormal) {
+                        console.log('[PostProducto][Normal] Llenado completado');
+                    }
+                }
+            }
             if (avanceTrasProductoConfirmado === 'taller') {
                 return labelPropositoTaller;
             }

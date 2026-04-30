@@ -18,6 +18,7 @@ export {
   cancelarCasoEnBizagiDesdePortal,
   extraerCasoActivoMpn,
   abrirSolicitudCumplimientoEnBizagiDesdePortal,
+  abrirSolicitudPlaftEnBizagiDesdePortal,
 } from "../../../ceExBizagi";
 
 export { seleccionarProductoCuentaEfectivoNuevo } from "./productSelection";
