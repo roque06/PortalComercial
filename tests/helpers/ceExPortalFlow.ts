@@ -9,7 +9,139 @@ function escapeRegex(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function encontrarDropdownInstrumentoRobusto(page: import("@playwright/test").Page): Promise<import("@playwright/test").Locator | null> {
+  console.log('[Instrumento][Robusto] Buscando dropdown Instrumento en múltiples scopes');
+
+  const scopes = [
+    { name: 'label_exacto', locator: page.locator('label').filter({ hasText: /^Instrumento$/i }).first() },
+    { name: 'getByText', locator: page.getByText(/^Instrumento$/i).first() },
+    { name: 'label_instrumento', locator: page.locator('label').filter({ hasText: /Instrumento/i }).first() },
+  ];
+
+  for (const scope of scopes) {
+    const visible = await scope.locator.isVisible().catch(() => false);
+    console.log(`[Instrumento][Robusto] scope=${scope.name} visible=${visible}`);
+    if (!visible) continue;
+
+    const dd = scope.locator.locator(
+      'xpath=following-sibling::div[contains(@class,"p-dropdown") or contains(@class,"p-select")] | ' +
+      'xpath=following-sibling::span[contains(@class,"p-dropdown")] | ' +
+      'xpath=following-sibling::*[role="combobox"] | ' +
+      'xpath=following::div[contains(@class,"p-dropdown") or contains(@class,"p-select")][1]'
+    ).first();
+
+    const ddVisible = await dd.isVisible().catch(() => false);
+    if (ddVisible) {
+      console.log(`[Instrumento][Robusto] Encontrado en scope=${scope.name}`);
+      return dd;
+    }
+
+    const dropdownsCercanos = page.locator('.p-dropdown:visible, .p-select:visible');
+    const count = await dropdownsCercanos.count().catch(() => 0);
+    console.log(`[Instrumento][Robusto] scope=${scope.name} dropdowns cercanos=${count}`);
+
+    if (count > 0) {
+      const candidatos: { index: number; texto: string; bbox: string; vacio: boolean }[] = [];
+      const textosExcluir = ['ahorros personales', 'e-mail', 'peso dominicano', 'dop', 'tipo de correspondencia', 'propósito'];
+
+      for (let k = 0; k < Math.min(count, 3); k++) {
+        const ddCand = dropdownsCercanos.nth(k);
+        const txt = ((await ddCand.locator('.p-dropdown-label, [data-pc-section="label"]').first().textContent().catch(() => '')) || '').trim();
+        const clases = (await ddCand.locator('.p-dropdown-label, [data-pc-section="label"]').first().getAttribute('class').catch(() => '')) || '';
+        const vacio = !txt || /^seleccione/i.test(txt) || clases.includes('p-placeholder');
+
+        const bbox = await ddCand.boundingBox().catch(() => null);
+        const bboxStr = bbox ? `x=${Math.round(bbox.x)} y=${Math.round(bbox.y)} w=${Math.round(bbox.width)} h=${Math.round(bbox.height)}` : 'no-bbox';
+
+        candidatos.push({ index: k, texto: txt, bbox: bboxStr, vacio });
+        console.log(`[Instrumento][Robusto] candidato ${k + 1} bbox=${bboxStr} texto='${txt}' vacio=${vacio}`);
+      }
+
+      const labelInstrumento = scope.locator;
+      const labelBbox = await labelInstrumento.boundingBox().catch(() => null);
+
+      for (const cand of candidatos) {
+        if (cand.texto && textosExcluir.some(exc => cand.texto.toLowerCase().includes(exc))) {
+          console.log(`[Instrumento][Robusto] candidato ${cand.index + 1} excluido por texto prohibido: '${cand.texto}'`);
+          continue;
+        }
+
+        const ddCand = dropdownsCercanos.nth(cand.index);
+        const candBbox = await ddCand.boundingBox().catch(() => null);
+
+        if (labelBbox && candBbox) {
+          const mismaFila = Math.abs(labelBbox.y - candBbox.y) < 30;
+          const debajo = candBbox.y > labelBbox.y;
+
+          console.log(`[Instrumento][Robusto] candidato ${cand.index + 1} mismaFila=${mismaFila} debajo=${debajo} y_label=${Math.round(labelBbox.y)} y_dd=${Math.round(candBbox.y)}`);
+
+          if (debajo && cand.vacio) {
+            console.log(`[Instrumento][Robusto] seleccionado candidato ${cand.index + 1} por estar debajo del label y estar vacío`);
+            return ddCand;
+          }
+
+          if (debajo) {
+            console.log(`[Instrumento][Robusto] seleccionado candidato ${cand.index + 1} por estar debajo del label`);
+            return ddCand;
+          }
+        }
+      }
+
+      const candidatosValidos = candidatos.filter(c => {
+        if (c.texto && textosExcluir.some(exc => c.texto.toLowerCase().includes(exc))) return false;
+        return true;
+      });
+
+      if (candidatosValidos.length > 0) {
+        console.log(`[Instrumento][Robusto] usando candidato válido ${candidatosValidos[0].index + 1} con texto='${candidatosValidos[0].texto}'`);
+        return dropdownsCercanos.nth(candidatosValidos[0].index);
+      }
+
+      console.log(`[Instrumento][Robusto] ningún candidato válido, retornando primero`);
+      return dropdownsCercanos.first();
+    }
+  }
+
+  console.log('[Instrumento][Robusto] No se encontró en ningún scope, intentando con todos los dropdowns');
+  const allDropdowns = page.locator('.p-dropdown:visible, .p-select:visible');
+  const total = await allDropdowns.count().catch(() => 0);
+  console.log(`[Instrumento][Robusto] total dropdowns en página=${total}`);
+
+  if (total > 0) {
+    return allDropdowns.first();
+  }
+
+  return null;
+}
+
 export async function seleccionarInstrumentoRobusto(page: import("@playwright/test").Page) {
+  // Función que replica la lógica de leerEstadoDropdown para validación final
+  const leerEstadoInstrumento = async () => {
+    const label = page.locator('label').filter({ hasText: /Instrumento/i }).first();
+    if (!(await label.isVisible().catch(() => false))) {
+      return { vacio: true, texto: '' };
+    }
+
+    let dropdown = label.locator(
+      'xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown"]][1]//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown"][1]'
+    ).first();
+
+    if (!(await dropdown.isVisible().catch(() => false))) {
+      dropdown = label.locator('xpath=following::div[contains(@class,"p-dropdown") or @data-pc-name="dropdown"][1]').first();
+    }
+
+    if (!(await dropdown.isVisible().catch(() => false))) {
+      return { vacio: true, texto: '' };
+    }
+
+    const labelEl = dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+    const texto = ((await labelEl.textContent().catch(() => '')) || '').trim();
+    const clases = (await labelEl.getAttribute('class').catch(() => '')) || '';
+
+    const vacio = !texto || /^seleccione/i.test(texto) || clases.includes('p-placeholder');
+    return { vacio, texto };
+  };
+
   // Localiza el dropdown de Instrumento usando multiples estrategias de localizacion.
   const encontrarDropdownInstrumento = async () => {
     // Estrategia 1: label con texto exacto "Instrumento"
@@ -122,16 +254,18 @@ export async function seleccionarInstrumentoRobusto(page: import("@playwright/te
   for (let i = 1; i <= 5; i++) {
     await clickReintentarListaSiVisible(page, "Instrumento");
 
-    const dd = await encontrarDropdownInstrumento();
+    const dd = await encontrarDropdownInstrumentoRobusto(page);
     if (!dd) {
       console.log(`[Instrumento] Intento ${i}/5: dropdown no encontrado. Esperando...`);
       await page.waitForTimeout(1000);
       continue;
     }
 
-    // Si ya tiene valor, no hacer nada
-    if (await tieneValor(dd)) {
-      console.log(`[Instrumento] Intento ${i}/5: ya tiene valor seleccionado.`);
+    // Si ya tiene valor, no hacer nada - verificar con leerEstadoInstrumento (geometría label→dropdown)
+    const estadoInicial = await leerEstadoInstrumento();
+    console.log(`[Instrumento] Intento ${i}/5: estado inicial vacio=${estadoInicial.vacio} texto='${estadoInicial.texto}'`);
+    if (!estadoInicial.vacio) {
+      console.log(`[Instrumento] Intento ${i}/5: ya tiene valor seleccionado (verificado por geometría).`);
       return;
     }
 
@@ -150,7 +284,9 @@ export async function seleccionarInstrumentoRobusto(page: import("@playwright/te
     }
 
     await page.waitForTimeout(400);
-    if (await tieneValor(dd)) {
+    const estadoPost = await leerEstadoInstrumento();
+    console.log(`[Instrumento] Intento ${i}/5: estado final vacio=${estadoPost.vacio} texto='${estadoPost.texto}'`);
+    if (!estadoPost.vacio) {
       console.log(`[Instrumento] Intento ${i}/5: valor seleccionado correctamente.`);
       return;
     }
@@ -159,7 +295,9 @@ export async function seleccionarInstrumentoRobusto(page: import("@playwright/te
     console.log(`[Instrumento] Intento ${i}/5: sin valor tras primer intento. Reintentando con estrategia directa...`);
     await seleccionarPrimerItem(dd).catch(() => {});
     await page.waitForTimeout(400);
-    if (await tieneValor(dd)) return;
+    const estadoPost2 = await leerEstadoInstrumento();
+    console.log(`[Instrumento] Intento ${i}/5: estado final intento 2 vacio=${estadoPost2.vacio} texto='${estadoPost2.texto}'`);
+    if (!estadoPost2.vacio) return;
 
     await page.waitForTimeout(800);
   }

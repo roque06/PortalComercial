@@ -16,6 +16,7 @@ export type RegistroExcel = {
 
 export type LeerRegistrosExcelOpts = {
   soloClienteNuevoSI?: boolean;
+  incluirRelacionados?: boolean;
 };
 
 function normKey(s: any) {
@@ -48,36 +49,73 @@ export function leerRegistrosDesdeExcel(
 
   console.log("Headers detectados:", Object.keys(datos?.[0] ?? {}));
 
-  const registros = datos
-    .map((fila: any) => {
-      const f: Record<string, string> = {};
-      for (const [k, v] of Object.entries(fila)) {
-        f[normKey(k)] = String(v ?? "").trim();
+  const registros: Array<{
+    identificacion: string;
+    tipoCuenta: string;
+    relacionado: boolean;
+    cedRelacionado: string;
+    clienteNuevo: boolean;
+    tasaExepcion: string;
+    valorTasa: string;
+    filaOriginal: number;
+  }> = [];
+
+  for (let i = 0; i < datos.length; i++) {
+    const fila = datos[i];
+    const filaNum = i + 2;
+    const f: Record<string, string> = {};
+    for (const [k, v] of Object.entries(fila)) {
+      f[normKey(k)] = String(v ?? "").trim();
+    }
+
+    const identificacion = f["identificacion"] || f["cedula"] || "";
+    const tipoCuenta = f["tipo cuenta"] || f["tipocuenta"] || f["tipo_cuenta"] || "";
+    const relacionadoRaw = f["relacionado"] || "";
+    const cedRelacionado =
+      f["ced_relacionado"] || f["ced relacionado"] || f["cedrelacionado"] || "";
+    const clienteNuevoRaw =
+      f["cliente nuevo"] || f["cliente_nuevo"] || f["clientenuevo"] || "";
+    const tasaExepcion =
+      f["tasa exepcion"] ||
+      f["tasa excepcion"] ||
+      f["tasa_exepcion"] ||
+      f["tasa_excepcion"] ||
+      "";
+    const valorTasa =
+      f["valor tasa"] ||
+      f["valor_tasa"] ||
+      f["valortasa"] ||
+      "";
+
+    const relacionado = /^(si|sí|true|1)$/i.test(String(relacionadoRaw).trim());
+    const clienteNuevo = /^(si|sí|true|1)$/i.test(String(clienteNuevoRaw).trim());
+
+    if (!identificacion || !tipoCuenta) {
+      console.log(`[Excel][Read] fila=${filaNum} identificacion='${identificacion}' tipoCuenta='${tipoCuenta}' clienteNuevo='${clienteNuevoRaw}' relacionado='${relacionadoRaw}' incluida=false motivo='campo_vacio'`);
+      continue;
+    }
+
+    let incluida = false;
+    let motivo = "";
+
+    if (opts.soloClienteNuevoSI) {
+      if (!clienteNuevo) {
+        motivo = "cliente_nuevo_NO";
+      } else if (!opts.incluirRelacionados && relacionado) {
+        motivo = "relacionado_SI";
+      } else {
+        incluida = true;
+        motivo = "";
       }
+    } else {
+      incluida = true;
+      motivo = "";
+    }
 
-      const identificacion = f["identificacion"] || f["cedula"] || "";
-      const tipoCuenta = f["tipo cuenta"] || f["tipocuenta"] || f["tipo_cuenta"] || "";
-      const relacionadoRaw = f["relacionado"] || "";
-      const cedRelacionado =
-        f["ced_relacionado"] || f["ced relacionado"] || f["cedrelacionado"] || "";
-      const clienteNuevoRaw =
-        f["cliente nuevo"] || f["cliente_nuevo"] || f["clientenuevo"] || "";
-      const tasaExepcion =
-        f["tasa exepcion"] ||
-        f["tasa excepcion"] ||
-        f["tasa_exepcion"] ||
-        f["tasa_excepcion"] ||
-        "";
-      const valorTasa =
-        f["valor tasa"] ||
-        f["valor_tasa"] ||
-        f["valortasa"] ||
-        "";
+    console.log(`[Excel][Read] fila=${filaNum} identificacion='${identificacion}' tipoCuenta='${tipoCuenta}' clienteNuevo='${clienteNuevoRaw}' relacionado='${relacionadoRaw}' incluida=${incluida} motivo='${motivo}'`);
 
-      const relacionado = /^(si|sí|true|1)$/i.test(String(relacionadoRaw).trim());
-      const clienteNuevo = /^(si|sí|true|1)$/i.test(String(clienteNuevoRaw).trim());
-
-      return {
+    if (incluida) {
+      registros.push({
         identificacion,
         tipoCuenta,
         relacionado,
@@ -85,19 +123,17 @@ export function leerRegistrosDesdeExcel(
         clienteNuevo,
         tasaExepcion,
         valorTasa,
-      };
-    })
-    .filter((r) => r.identificacion && r.tipoCuenta);
+        filaOriginal: filaNum,
+      });
+    }
+  }
 
-  if (!opts.soloClienteNuevoSI) return registros;
-
-  const filtrados = registros.filter((r) => Boolean(r.clienteNuevo));
-  if (registros.length > 0 && filtrados.length === 0) {
+  if (opts.soloClienteNuevoSI && registros.length === 0 && datos.length > 0) {
     throw new Error(
-      `Se solicito filtrar por Cliente_Nuevo=SI en hoja '${hojaObjetivo}', pero no se encontro ninguna fila valida.`
+      `Se solicito filtrar por Cliente_Nuevo=SI y Relacionado=NO en hoja '${hojaObjetivo}', pero no se encontro ninguna fila valida.`
     );
   }
-  return filtrados;
+  return registros;
 }
 
 export type MarcarCedulaProcesadaOpts = {

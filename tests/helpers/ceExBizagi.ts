@@ -2476,9 +2476,11 @@ async function ejecutarSecuenciaDependienteOfacConfirmarDescartar(
   return accionDescartar;
 }
 
+type MotivoOfacResultado = 'ok' | 'opciones_confirmar_con_descartar' | 'sin-opciones' | 'descartar-no-marcado';
+
 async function seleccionarAccionOfacDescartarYEsperarMotivos(
   bizagiPage: Page
-): Promise<{ accionDescartar: boolean; motivosDisponibles: boolean }> {
+): Promise<{ accionDescartar: boolean; motivosDisponibles: boolean; motivo: MotivoOfacResultado }> {
   console.log('[OFAC] Preparando carga de motivos: Confirmar -> Descartar');
   let accionDescartar = await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage);
   let subintentosDescartar = 0;
@@ -2495,16 +2497,18 @@ async function seleccionarAccionOfacDescartarYEsperarMotivos(
   console.log(`[OFAC] Acción Coincidencias OFAC marcada=${accionDescartar}`);
 
   if (!accionDescartar) {
-    return { accionDescartar: false, motivosDisponibles: false };
+    return { accionDescartar: false, motivosDisponibles: false, motivo: 'descartar-no-marcado' };
   }
 
   console.log('[OFAC] Descartar marcado; esperando carga de motivos');
   console.log('[OFAC] Esperando opciones de motivo para Descartar');
   const opcionesValidas = await esperarOpcionesMotivoDescartar(bizagiPage);
-  return { accionDescartar: true, motivosDisponibles: opcionesValidas };
+  return { accionDescartar: true, motivosDisponibles: opcionesValidas.ok, motivo: opcionesValidas.motivo };
 }
 
-async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean> {
+type ResultadoMotivosOfac = { ok: boolean; motivo: 'ok' | 'opciones_confirmar_con_descartar' | 'sin-opciones' };
+
+async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<ResultadoMotivosOfac> {
   const comboMotivo = bizagiPage
     .locator('xpath=(//*[contains(normalize-space(.),"Motivo Coincidencias OFAC")]/following::input[@role="combobox" or contains(@class,"ui-select-data") or contains(@class,"ui-selectmenu-value")][1])')
     .first();
@@ -2515,19 +2519,44 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
   const startTime = Date.now();
   const timeout = 8000;
   const pollMs = 300;
+  const MAX_REFRESH_CONFIRMAR_DESCARTAR = 2;
   let placeholderDesde = 0;
   let ultimoRedisparo = 0;
+  let refreshConfirmarDescartarCount = 0;
+  let agotadoRefreshLogged = false;
+
+  const puedeRefrescar = () => refreshConfirmarDescartarCount < MAX_REFRESH_CONFIRMAR_DESCARTAR;
+
+  const logAgotado = (causa: 'placeholder' | 'confirmar' | 'sin-validas') => {
+    if (agotadoRefreshLogged) return;
+    agotadoRefreshLogged = true;
+    if (causa === 'confirmar') {
+      console.log('[OFAC][Motivo][WARN] opciones de Confirmar detectadas con Descartar marcado después de 2 refresh');
+    } else {
+      console.log('[OFAC][Motivo][WARN] opciones siguen siendo de Confirmar después de 2 refresh; no se reintentará más en este intento interno');
+    }
+    console.log('[OFAC] Descartar sigue marcado=true; motivos no cargaron');
+  };
 
   const reDispararSecuencia = async (motivo: 'placeholder' | 'confirmar' | 'sin-validas') => {
+    if (!puedeRefrescar()) {
+      logAgotado(motivo);
+      return false;
+    }
+    refreshConfirmarDescartarCount++;
     if (motivo === 'placeholder') {
-      console.log('[OFAC][Motivo] Solo placeholder detectado; re-disparando Confirmar -> Descartar');
+      console.log(`[OFAC][Motivo] refresh Confirmar->Descartar ${refreshConfirmarDescartarCount}/${MAX_REFRESH_CONFIRMAR_DESCARTAR} (placeholder)`);
     } else if (motivo === 'confirmar') {
-      console.log('[OFAC][Motivo] Opciones de Confirmar detectadas; re-disparando Confirmar -> Descartar');
+      console.log('[OFAC][Motivo] Opciones de Confirmar detectadas con Descartar marcado=true');
+      console.log(`[OFAC][Motivo] refresh Confirmar->Descartar ${refreshConfirmarDescartarCount}/${MAX_REFRESH_CONFIRMAR_DESCARTAR}`);
+    } else {
+      console.log(`[OFAC][Motivo] refresh Confirmar->Descartar ${refreshConfirmarDescartarCount}/${MAX_REFRESH_CONFIRMAR_DESCARTAR} (sin-validas)`);
     }
     ultimoRedisparo = Date.now();
     await ejecutarSecuenciaDependienteOfacConfirmarDescartar(bizagiPage).catch(() => false);
     await comboMotivo.scrollIntoViewIfNeeded().catch(() => {});
     await comboMotivo.click({ force: true }).catch(() => {});
+    return true;
   };
 
   while (Date.now() - startTime < timeout) {
@@ -2573,13 +2602,18 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
         console.log('[OFAC] Motivos de Descartar disponibles=true');
         await bizagiPage.keyboard.press('Escape').catch(() => {});
         await bizagiPage.waitForTimeout(250);
-        return true;
+        return { ok: true, motivo: 'ok' };
       }
 
       if (soloPlaceholder) {
         if (!placeholderDesde) placeholderDesde = Date.now();
         if (Date.now() - placeholderDesde >= 1500 && Date.now() - ultimoRedisparo >= 900) {
           await bizagiPage.keyboard.press('Escape').catch(() => {});
+          if (!puedeRefrescar()) {
+            logAgotado('placeholder');
+            await bizagiPage.keyboard.press('Escape').catch(() => {});
+            return { ok: false, motivo: 'sin-opciones' };
+          }
           await reDispararSecuencia('placeholder');
           placeholderDesde = 0;
           continue;
@@ -2590,12 +2624,22 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
 
       if (opcionesConfirmar && Date.now() - ultimoRedisparo >= 900) {
         await bizagiPage.keyboard.press('Escape').catch(() => {});
+        if (!puedeRefrescar()) {
+          logAgotado('confirmar');
+          await bizagiPage.keyboard.press('Escape').catch(() => {});
+          return { ok: false, motivo: 'opciones_confirmar_con_descartar' };
+        }
         await reDispararSecuencia('confirmar');
         continue;
       }
 
       if (!tieneOpcionValida && Date.now() - ultimoRedisparo >= 1500) {
         await bizagiPage.keyboard.press('Escape').catch(() => {});
+        if (!puedeRefrescar()) {
+          logAgotado('sin-validas');
+          await bizagiPage.keyboard.press('Escape').catch(() => {});
+          return { ok: false, motivo: 'sin-opciones' };
+        }
         await reDispararSecuencia('sin-validas');
         continue;
       }
@@ -2606,7 +2650,7 @@ async function esperarOpcionesMotivoDescartar(bizagiPage: Page): Promise<boolean
   }
 
   console.log('[OFAC] No se encontraron opciones válidas de descarte después de 8 segundos');
-  return false;
+  return { ok: false, motivo: 'sin-opciones' };
 }
 
 async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<void> {
@@ -2645,6 +2689,7 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
   let motivoSeleccionado = false;
   let valorMotivo = '';
   let solicitarAclaracionesNo = false;
+  let ofacRefreshPorMotivosConfirmarHecho = false;
 
   for (let intento = 1; intento <= 3; intento++) {
     console.log(`[OFAC] Intento interno ${intento}/3`);
@@ -2665,14 +2710,33 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
     }
 
     if (!motivosDisponibles) {
-      console.log('[OFAC] Descartar sigue marcado=true; motivos no cargaron');
-      await refrescarOfacDescartarConConfirmar(bizagiPage);
-      const reintentoMotivos = await esperarOpcionesMotivoDescartar(bizagiPage);
-      motivosDisponibles = reintentoMotivos;
-      if (!motivosDisponibles) {
-        if (intento < 3) continue;
-        throw new Error('[CRITICO][OFAC] Motivos de Descartar no cargaron después de 3 intentos internos.');
+      if (resultadoDescartar.motivo === 'opciones_confirmar_con_descartar') {
+        if (!ofacRefreshPorMotivosConfirmarHecho) {
+          console.log('[OFAC][Motivo][RECOVERY] refrescando/reabriendo Bizagi una sola vez para limpiar dependencias del combo');
+          await bizagiPage.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+          const recuperada = await pantalla
+            .waitFor({ state: 'visible', timeout: 20000 })
+            .then(() => true)
+            .catch(() => false);
+          console.log(`[OFAC][Motivo][RECOVERY] pantalla Gestionar Coincidencias recuperada=${recuperada}`);
+
+          if (!recuperada) {
+            console.log('[OFAC][Motivo][RECOVERY] no se reintentará en pantalla incompleta; requiere reabrir MPN');
+            throw new Error('[OFAC][RECOVERY_REOPEN_REQUIRED] pantalla no recuperada tras reload; reabrir MPN desde bandeja');
+          }
+
+          console.log('[OFAC] Reintentando OFAC después de refresh controlado');
+          ofacRefreshPorMotivosConfirmarHecho = true;
+          accionDescartar = false;
+          motivosDisponibles = false;
+          intento = 0;
+          continue;
+        }
+        throw new Error('[OFAC][CRITICO] Motivos siguen siendo de Confirmar después de refresh controlado; se aborta OFAC para evitar ciclo');
       }
+      console.log('[OFAC] Descartar sigue marcado=true; motivos no cargaron');
+      if (intento < 3) continue;
+      throw new Error('[CRITICO][OFAC] Motivos de Descartar no cargaron después de 3 intentos internos.');
     }
 
     if (intento > 1) {

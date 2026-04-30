@@ -1,23 +1,22 @@
 Usa la skill oracle-cierre-dba.
 
-Revisa la base: QA7
+Revisa la base: QA2
 Baseline de comparacion: QA3
 Usuario: system
 Contrasena: system
 
 Contexto del problema:
-Al ejecutar los f5 cod proceso 21 me indica que tengo asientos incompletos
+el proceso da error y retorna CG-000099.CG-000099 Error del Sistema Error al aplicar Detalle asiento # 38193116, Cta. Contable : 17801116, Mensaje Error: Act_Auxiliar, Cta. Contable : 17801116Auxiliar 10499, Error: User-Defined ExceptionCG-000099.CG-000099 Error del Sistema Error al aplicar Detalle asiento # 38193116, Cta. Contable : 17801116, Mensaje Error: Act_Auxiliar, Cta. Contable : 17801116Auxiliar 10499, Error: User-Defined Exception
 
 Sistema de cierre: F5
-Proceso de cierre: 21
+Proceso de cierre: 4
 
 Error mostrado por la web o por la aplicacion:
 
-CG-000264.CG-000264 Existe asientos incompletos para la unidad @. Proceso no sera realizado.CG-000264.CG-000264 Existe asientos incompletos para la unidad @. Proceso no sera realizado.
-
+CG-000099.CG-000099 Error del Sistema Error al aplicar Detalle asiento # 38193116, Cta. Contable : 17801116, Mensaje Error: Act_Auxiliar, Cta. Contable : 17801116Auxiliar 10499, Error: User-Defined ExceptionCG-000099.CG-000099 Error del Sistema Error al aplicar Detalle asiento # 38193116, Cta. Contable : 17801116, Mensaje Error: Act_Auxiliar, Cta. Contable : 17801116Auxiliar 10499, Error: User-Defined Exception
 Que necesito:
 1. Diagnostica la causa en la DB.
-2. Compara contra QA3.
+2. Compara contra QA3 Si es necesario.
 3. Revisa jobs, scheduler, PA_PROCESO_CIERRE, PA_BITACORA_PROCESO_CIERRE y PA_ERRORES_PROCESO_CIERRE.
 4. Si el problema es seguro de corregir y es de configuracion tecnica, aplica el fix.
 5. Dime al final que encontraste, que corregiste y si ya puedo correr el cierre otra vez.
