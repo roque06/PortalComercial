@@ -4311,258 +4311,204 @@ async function completarDireccionPostProducto(page: Page) {
         return true;
     };
 
-    const seleccionarComboRapido = async (label: RegExp, nombre: string, required = true, preferida?: RegExp) => {
-        const valorActual = await leerValorRapido(label);
-        if (!valorInvalido(valorActual)) {
-            console.log(`[Direccion] ${nombre} ya tiene valor, se omite`);
-            return { ok: true, valor: valorActual };
-        }
-
-        console.log(`[Direccion] Seleccionando ${nombre}`);
-        const { labelLoc, campo } = await resolverCampoDireccion(label);
-        const dropdown = campo.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
-        const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
-        const input = campo.locator('input:visible').first();
-        const boton = campo.locator('button:visible').first();
-        if (await dropdown.isVisible().catch(() => false)) {
-            await dropdown.click({ force: true, timeout: 1200 }).catch(() => { });
-        } else if (await trigger.isVisible().catch(() => false)) {
-            await trigger.click({ force: true, timeout: 1200 }).catch(() => { });
-        } else if (await input.isVisible().catch(() => false)) {
-            await input.click({ force: true, timeout: 1200 }).catch(() => { });
-        } else if (await boton.isVisible().catch(() => false)) {
-            await boton.click({ force: true, timeout: 1200 }).catch(() => { });
-        } else {
-            await labelLoc.click({ force: true }).catch(() => { });
-        }
-
-        let panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
-        let panelVisible = await panel.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
-        if (!panelVisible) {
-            await trigger.click({ force: true, timeout: 800 }).catch(() => { });
-            await input.click({ force: true, timeout: 800 }).catch(() => { });
-            await page.keyboard.press('ArrowDown').catch(() => { });
-            panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open').last();
-            panelVisible = await panel.waitFor({ state: 'visible', timeout: 1000 }).then(() => true).catch(() => false);
-        }
-
-        if (!panelVisible) {
-            await page.keyboard.press('Enter').catch(() => { });
-            await page.waitForTimeout(FAST_UI ? 150 : 250);
-            const valorTrasTeclado = await leerValorRapido(label);
-            const ok = !valorInvalido(valorTrasTeclado);
-            if (ok) {
-                console.log(`[Direccion] ${nombre} seleccionado rapido=true valor='${valorTrasTeclado}'`);
-                return { ok: true, valor: valorTrasTeclado };
-            }
-            throw new Error(`[Direccion] No se abrio dropdown de ${nombre}. valorActual='${valorActual}'`);
-        }
-
-        const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
-        const total = await opciones.count().catch(() => 0);
-        const participio = /Regi(?:o|ó)n|Provincia|Localidad/i.test(nombre) ? 'seleccionada' : 'seleccionado';
-        if (preferida) {
-            const opcionPreferida = opciones.filter({ hasText: preferida }).first();
-            if (await opcionPreferida.isVisible().catch(() => false)) {
-                await opcionPreferida.click({ force: true, timeout: 1200 }).catch(() => { });
-                await page.waitForTimeout(FAST_UI ? 180 : 350);
-                const valorFinalPreferido = await leerValorRapido(label);
-                const okPreferido = !valorInvalido(valorFinalPreferido);
-                console.log(`[Direccion] ${nombre} ${participio} rapido=${okPreferido} valor='${valorFinalPreferido}'`);
-                if (!okPreferido && required) throw new Error(`[Direccion] ${nombre} quedo vacio tras seleccionar opcion preferida.`);
-                return { ok: okPreferido, valor: valorFinalPreferido };
-            }
-        }
-
-        for (let i = 0; i < total; i++) {
-            const opcion = opciones.nth(i);
-            if (!(await opcion.isVisible().catch(() => false))) continue;
-            const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
-            if (valorInvalido(texto)) continue;
-            await opcion.click({ force: true, timeout: 1200 }).catch(() => { });
-            await page.waitForTimeout(FAST_UI ? 120 : 250);
-            const valorFinal = await leerValorRapido(label);
-            const ok = !valorInvalido(valorFinal);
-            console.log(`[Direccion] ${nombre} ${participio} rapido=${ok} valor='${valorFinal}'`);
-            if (!ok && required) throw new Error(`[Direccion] ${nombre} quedo vacio tras seleccionar '${texto}'.`);
-            return { ok, valor: valorFinal };
-        }
-
-        throw new Error(`[Direccion] No hay opciones validas para ${nombre}. total=${total}`);
-    };
-
-    const seleccionarDireccionDependienteSecuencial = async (
-        modalDireccionScope: Locator,
+    async function seleccionarDropdownDireccionPorIndiceVisual(
         currentPage: Page,
-        pasos: Array<{
-            nombre: string;
-            label: RegExp;
-            preferido?: RegExp;
-        }>
-    ): Promise<Record<string, string>> => {
-        const resultados: Record<string, string> = {};
+        modalDireccionScope: Locator,
+        indice: number,
+        nombre: string,
+        preferido?: RegExp
+    ): Promise<{ ok: boolean; valor: string }> {
+        console.log(`[Direccion][Visual] ${nombre} inicio indice=${indice}`);
 
-        const resolverDropdownDireccion = async (labelRegex: RegExp) => {
-            const { labelLoc, campo } = await resolverCampoDireccion(labelRegex);
-            const dropdown = campo.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
-            const trigger = campo.locator('.p-dropdown-trigger, [data-pc-section="trigger"], .ui-selectmenu-btn, .ui-selectmenu-button, .ui-selectmenu-trigger').first();
-            const input = campo.locator('input:visible').first();
-            const boton = campo.locator('button:visible').first();
-            return { labelLoc, campo, dropdown, trigger, input, boton };
-        };
-
-        const leerValorVisualDireccion = async (labelRegex: RegExp) => {
-            const { campo, dropdown, input } = await resolverDropdownDireccion(labelRegex);
-            const labelDropdown = campo.locator('.p-dropdown-label:visible, [data-pc-section="label"]:visible').first();
-            const textoDropdown = ((await labelDropdown.innerText().catch(() => '')) || '').trim();
-            if (!valorInvalido(textoDropdown) && textoDropdown !== 'p-dropdown-label') return textoDropdown;
-
-            const textoCombobox = ((await dropdown.textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
-            if (!valorInvalido(textoCombobox) && !labelRegex.test(textoCombobox)) return textoCombobox;
-
-            const valorInput = ((await input.inputValue().catch(() => '')) || '').trim();
-            if (!valorInvalido(valorInput)) return valorInput;
-            return '';
-        };
-
-        const esperarDropdownListo = async (labelRegex: RegExp) => {
-            const inicio = Date.now();
-            const timeoutMs = 4000;
-            while (Date.now() - inicio < timeoutMs) {
-                const { campo, dropdown, trigger, input } = await resolverDropdownDireccion(labelRegex);
-                const className = `${await campo.getAttribute('class').catch(() => '')} ${await dropdown.getAttribute('class').catch(() => '')} ${await input.getAttribute('class').catch(() => '')}`.toLowerCase();
-                const ariaDisabled = `${await dropdown.getAttribute('aria-disabled').catch(() => '')}${await input.getAttribute('aria-disabled').catch(() => '')}`.toLowerCase();
-                const disabledAttr = `${await dropdown.getAttribute('disabled').catch(() => '')}${await input.getAttribute('disabled').catch(() => '')}`.toLowerCase();
-                const visible = await dropdown.isVisible().catch(() => false)
-                    || await trigger.isVisible().catch(() => false)
-                    || await input.isVisible().catch(() => false);
-                const loading = /loading|skeleton|spinner/.test(className);
-                const disabled = /disabled/.test(className) || ariaDisabled === 'true' || !!disabledAttr;
-                if (visible && !loading && !disabled) return true;
-                await currentPage.waitForTimeout(200);
-            }
-            return false;
-        };
-
-        const abrirYContarOpciones = async (labelRegex: RegExp) => {
-            const { labelLoc, dropdown, trigger, input, boton } = await resolverDropdownDireccion(labelRegex);
-            if (await dropdown.isVisible().catch(() => false)) {
-                await dropdown.click({ force: true, timeout: 1200 }).catch(() => { });
-            } else if (await trigger.isVisible().catch(() => false)) {
-                await trigger.click({ force: true, timeout: 1200 }).catch(() => { });
-            } else if (await input.isVisible().catch(() => false)) {
-                await input.click({ force: true, timeout: 1200 }).catch(() => { });
-            } else if (await boton.isVisible().catch(() => false)) {
-                await boton.click({ force: true, timeout: 1200 }).catch(() => { });
-            } else {
-                await labelLoc.click({ force: true }).catch(() => { });
+        for (let intento = 1; intento <= 3; intento++) {
+            await modalDireccionScope.scrollIntoViewIfNeeded().catch(() => { });
+            const dropdowns = modalDireccionScope.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+            const count = await dropdowns.count().catch(() => 0);
+            console.log(`[Direccion][Visual] ${nombre} dropdowns visibles=${count}`);
+            if (count <= indice) {
+                if (intento >= 3) {
+                    throw new Error(`[Direccion][CRITICO] ${nombre} no existe en indice visual ${indice}. dropdowns=${count}`);
+                }
+                await currentPage.waitForTimeout(FAST_UI ? 250 : 450);
+                continue;
             }
 
-            const ariaControls = (await input.getAttribute('aria-controls').catch(() => ''))
-                || (await dropdown.getAttribute('aria-controls').catch(() => ''))
-                || (await trigger.getAttribute('aria-controls').catch(() => ''));
-            let panel = ariaControls
-                ? currentPage.locator(`#${ariaControls}`)
-                : currentPage.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open, .ui-selectmenu-menu:visible').last();
-            let panelVisible = await panel.waitFor({ state: 'visible', timeout: 1800 }).then(() => true).catch(() => false);
-            if (!panelVisible) {
-                await input.press('ArrowDown').catch(() => { });
-                panel = ariaControls
-                    ? currentPage.locator(`#${ariaControls}`)
-                    : currentPage.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible, div.ui-select-dropdown.open, .ui-selectmenu-menu:visible').last();
-                panelVisible = await panel.waitFor({ state: 'visible', timeout: 1200 }).then(() => true).catch(() => false);
+            const dropdown = dropdowns.nth(indice);
+            const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+            const combobox = dropdown.locator('[role="combobox"]').first();
+            const label = dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+
+            let abierto = await trigger.click({ force: true, timeout: 1200 }).then(() => true).catch(() => false);
+            if (!abierto) {
+                abierto = await dropdown.click({ force: true, timeout: 1200 }).then(() => true).catch(() => false);
+            }
+            if (!abierto) {
+                const box = await dropdown.boundingBox().catch(() => null);
+                if (box) {
+                    abierto = await currentPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2).then(() => true).catch(() => false);
+                }
             }
 
-            const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"], .ui-selectmenu-item');
-            const totalOpciones = panelVisible ? await opciones.count().catch(() => 0) : 0;
-            return { panel, panelVisible, opciones, totalOpciones, input };
-        };
+            const ariaControls = (await combobox.getAttribute('aria-controls').catch(() => ''))
+                || (await label.getAttribute('aria-controls').catch(() => ''))
+                || (await dropdown.getAttribute('aria-controls').catch(() => ''));
 
-        for (let pasoIndex = 0; pasoIndex < pasos.length; pasoIndex++) {
-            const paso = pasos[pasoIndex];
-            console.log(`[Direccion][Secuencia] ${paso.nombre} inicio`);
-
-            let valorPaso = '';
-            for (let intento = 1; intento <= 3; intento++) {
-                await modalDireccionScope.scrollIntoViewIfNeeded().catch(() => { });
-                const listo = await esperarDropdownListo(paso.label);
-                if (!listo) {
-                    if (intento >= 3) {
-                        throw new Error(`[Direccion][CRITICO] ${paso.nombre} no estuvo listo para seleccionar.`);
-                    }
-                    await currentPage.waitForTimeout(250);
-                    continue;
-                }
-
-                const { opciones, totalOpciones, panelVisible, input } = await abrirYContarOpciones(paso.label);
-                console.log(`[Direccion][Secuencia] ${paso.nombre} opciones=${totalOpciones}`);
-
-                let opcionSeleccionable: Locator | null = null;
-                let candidato = '';
-                if (panelVisible) {
-                    for (let i = 0; i < totalOpciones; i++) {
-                        const opcion = opciones.nth(i);
-                        if (!(await opcion.isVisible().catch(() => false))) continue;
-                        const texto = ((await opcion.innerText().catch(() => '')) || '').trim();
-                        if (valorInvalido(texto)) continue;
-                        if (paso.preferido && paso.preferido.test(texto)) {
-                            opcionSeleccionable = opcion;
-                            candidato = texto;
-                            break;
-                        }
-                        if (!opcionSeleccionable) {
-                            opcionSeleccionable = opcion;
-                            candidato = texto;
-                        }
-                    }
-                }
-
-                if (!opcionSeleccionable) {
-                    await currentPage.keyboard.press('Escape').catch(() => { });
-                    if (intento >= 3) throw new Error(`[Direccion][CRITICO] ${paso.nombre} no tiene opciones válidas.`);
-                    await currentPage.waitForTimeout(250);
-                    continue;
-                }
-
-                await opcionSeleccionable.click({ force: true, timeout: 1200 }).catch(() => { });
-                await currentPage.getByText(new RegExp(`^${candidato.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, 'i')).last().click({ force: true }).catch(() => { });
-                await currentPage.keyboard.press('Enter').catch(() => { });
-                await currentPage.waitForTimeout(250);
-
-                valorPaso = await leerValorVisualDireccion(paso.label);
-                if (!valorInvalido(valorPaso)) {
-                    console.log(`[Direccion][Secuencia] ${paso.nombre} seleccionado='${valorPaso}'`);
-                    resultados[paso.nombre] = valorPaso;
-                    await currentPage.keyboard.press('Escape').catch(() => { });
-                    break;
-                }
-
+            let panel: Locator | null = null;
+            if (ariaControls) {
+                const panelById = currentPage.locator(`#${ariaControls}`);
+                const visible = await panelById.waitFor({ state: 'visible', timeout: 1800 }).then(() => true).catch(() => false);
+                if (visible) panel = panelById;
+            }
+            if (!panel) {
+                const fallback = currentPage.locator('.p-dropdown-panel:visible, [role="listbox"]:visible').last();
+                const visible = await fallback.waitFor({ state: 'visible', timeout: 1200 }).then(() => true).catch(() => false);
+                if (visible) panel = fallback;
+            }
+            if (!panel) {
                 await currentPage.keyboard.press('Escape').catch(() => { });
                 if (intento >= 3) {
-                    throw new Error(`[Direccion][CRITICO] ${paso.nombre} quedó vacío después de 3 intentos.`);
+                    throw new Error(`[Direccion][CRITICO] ${nombre} no abrió panel en 3 intentos.`);
                 }
-                await currentPage.waitForTimeout(250);
+                await currentPage.waitForTimeout(FAST_UI ? 250 : 450);
+                continue;
             }
 
-            const siguiente = pasos[pasoIndex + 1];
-            if (siguiente) {
-                console.log(`[Direccion][Secuencia] esperando carga de ${siguiente.nombre}`);
-                const listoSiguiente = await esperarDropdownListo(siguiente.label);
-                let opcionesSiguiente = 0;
-                if (listoSiguiente) {
-                    const apertura = await abrirYContarOpciones(siguiente.label);
-                    opcionesSiguiente = apertura.totalOpciones;
-                    await currentPage.keyboard.press('Escape').catch(() => { });
+            const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+            const totalOpciones = await opciones.count().catch(() => 0);
+            let opcionElegida: Locator | null = null;
+            let textoElegido = '';
+            let opcionesValidas = 0;
+
+            for (let i = 0; i < totalOpciones; i++) {
+                const opcion = opciones.nth(i);
+                if (!(await opcion.isVisible().catch(() => false))) continue;
+                const texto = ((await opcion.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+                if (!texto || /^por favor seleccione$/i.test(texto) || /^seleccione/i.test(texto) || valorInvalido(texto)) continue;
+                opcionesValidas++;
+                if (preferido && preferido.test(texto)) {
+                    opcionElegida = opcion;
+                    textoElegido = texto;
+                    break;
                 }
-                console.log(`[Direccion][Secuencia] ${siguiente.nombre} lista=${listoSiguiente} opciones=${opcionesSiguiente}`);
-                if (!listoSiguiente) {
-                    throw new Error(`[Direccion][CRITICO] ${siguiente.nombre} no cargó después de seleccionar ${paso.nombre}='${valorPaso}'.`);
+                if (!opcionElegida) {
+                    opcionElegida = opcion;
+                    textoElegido = texto;
                 }
             }
+
+            console.log(`[Direccion][Visual] ${nombre} opciones=${opcionesValidas}`);
+
+            if (!opcionElegida) {
+                await currentPage.keyboard.press('Escape').catch(() => { });
+                if (intento >= 3) {
+                    throw new Error(`[Direccion][CRITICO] ${nombre} no tiene opciones válidas.`);
+                }
+                await currentPage.waitForTimeout(FAST_UI ? 250 : 450);
+                continue;
+            }
+
+            await opcionElegida.click({ force: true, timeout: 1200 }).catch(() => { });
+            await currentPage.getByText(new RegExp(`^${textoElegido.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')).last().click({ force: true }).catch(() => { });
+            await currentPage.waitForTimeout(FAST_UI ? 200 : 350);
+
+            const valorLabel = ((await dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first().innerText().catch(() => '')) || '').trim();
+            const valorCombobox = ((await dropdown.locator('[role="combobox"]').first().textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            const valorVisual = !valorInvalido(valorLabel)
+                ? valorLabel
+                : (!valorInvalido(valorCombobox) ? valorCombobox : '');
+            console.log(`[Direccion][Visual] ${nombre} valorVisual='${valorVisual}'`);
+
+            if (!valorInvalido(valorVisual)) {
+                await currentPage.keyboard.press('Escape').catch(() => { });
+                return { ok: true, valor: valorVisual };
+            }
+
+            await currentPage.keyboard.press('Escape').catch(() => { });
+            if (intento >= 3) {
+                throw new Error(`[Direccion][CRITICO] ${nombre} quedó vacío después de 3 intentos.`);
+            }
+            await currentPage.waitForTimeout(FAST_UI ? 250 : 450);
         }
 
-        return resultados;
-    };
+        return { ok: false, valor: '' };
+    }
+
+    async function esperarCargaDireccionSiguiente(
+        currentPage: Page,
+        modalDireccionScope: Locator,
+        indice: number,
+        nombre: string
+    ) {
+        console.log(`[Direccion][Secuencia] esperando carga de ${nombre}`);
+        const inicio = Date.now();
+        const timeoutMs = FAST_UI ? 7000 : 10000;
+
+        while (Date.now() - inicio < timeoutMs) {
+            const dropdowns = modalDireccionScope.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+            const count = await dropdowns.count().catch(() => 0);
+            if (count > indice) {
+                const dropdown = dropdowns.nth(indice);
+                const className = `${await dropdown.getAttribute('class').catch(() => '')}`.toLowerCase();
+                const ariaDisabled = `${await dropdown.getAttribute('aria-disabled').catch(() => '')}`.toLowerCase();
+                const disabled = /disabled/.test(className) || ariaDisabled === 'true';
+                if (!disabled) {
+                    const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+                    const combobox = dropdown.locator('[role="combobox"]').first();
+                    const label = dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+
+                    let abierto = await trigger.click({ force: true, timeout: 1200 }).then(() => true).catch(() => false);
+                    if (!abierto) {
+                        abierto = await dropdown.click({ force: true, timeout: 1200 }).then(() => true).catch(() => false);
+                    }
+                    if (!abierto) {
+                        const box = await dropdown.boundingBox().catch(() => null);
+                        if (box) {
+                            abierto = await currentPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2).then(() => true).catch(() => false);
+                        }
+                    }
+
+                    const ariaControls = (await combobox.getAttribute('aria-controls').catch(() => ''))
+                        || (await label.getAttribute('aria-controls').catch(() => ''))
+                        || (await dropdown.getAttribute('aria-controls').catch(() => ''));
+
+                    let panel: Locator | null = null;
+                    if (ariaControls) {
+                        const panelById = currentPage.locator(`#${ariaControls}`);
+                        const visible = await panelById.waitFor({ state: 'visible', timeout: 1800 }).then(() => true).catch(() => false);
+                        if (visible) panel = panelById;
+                    }
+                    if (!panel) {
+                        const fallback = currentPage.locator('.p-dropdown-panel:visible, [role="listbox"]:visible').last();
+                        const visible = await fallback.waitFor({ state: 'visible', timeout: 1200 }).then(() => true).catch(() => false);
+                        if (visible) panel = fallback;
+                    }
+
+                    let opcionesValidas = 0;
+                    if (panel) {
+                        const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+                        const totalOpciones = await opciones.count().catch(() => 0);
+                        for (let i = 0; i < totalOpciones; i++) {
+                            const opcion = opciones.nth(i);
+                            if (!(await opcion.isVisible().catch(() => false))) continue;
+                            const texto = ((await opcion.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+                            if (!texto || /^por favor seleccione$/i.test(texto) || /^seleccione/i.test(texto) || valorInvalido(texto)) continue;
+                            opcionesValidas++;
+                        }
+                    }
+
+                    await currentPage.keyboard.press('Escape').catch(() => { });
+                    const listo = opcionesValidas > 0;
+                    console.log(`[Direccion][Secuencia] ${nombre} lista=${listo} opciones=${opcionesValidas}`);
+                    if (listo) return true;
+                }
+            }
+
+            await currentPage.waitForTimeout(FAST_UI ? 250 : 450);
+        }
+
+        console.log(`[Direccion][Secuencia] ${nombre} lista=false opciones=0`);
+        throw new Error(`[Direccion][CRITICO] ${nombre} no cargó después del paso anterior.`);
+    }
 
     await llenarTextoRapido(/Calle.*Avenida.*Autopista/i, randomTexto('Calle'));
     await llenarTextoRapido(/Nombre edificio/i, randomTexto('Edificio'), false).catch(() => false);
@@ -4572,39 +4518,45 @@ async function completarDireccionPostProducto(page: Page) {
     console.log('[Direccion] Tipo se omite; no es necesario seleccionarlo');
     console.log('[Direccion] País listo');
 
-    // Usar estrategia de Datos Laborales que funcionan correctamente
-    const direccionResultados = await seleccionarDireccionDependienteSecuencial(modalDireccion, page, [
-        { nombre: 'Región', label: /^Regi(?:o|ó)n$/i, preferido: /Distrito Nacional/i },
-        { nombre: 'Provincia', label: /^Provincia$/i, preferido: /Distrito Nacional/i },
-        { nombre: 'Municipio', label: /^Municipio$/i },
-        { nombre: 'Localidad', label: /^Localidad$/i },
-        { nombre: 'Sector', label: /^Sector$/i },
-    ]);
-    let regionValor = direccionResultados['Región'] || await leerValorRapido(/^Regi(?:o|ó)n$/i);
+    const region = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 1, 'Región', /Distrito Nacional/i);
+    await esperarCargaDireccionSiguiente(page, modalDireccion, 2, 'Provincia');
+
+    const provincia = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 2, 'Provincia', /Distrito Nacional/i);
+    await esperarCargaDireccionSiguiente(page, modalDireccion, 3, 'Municipio');
+
+    const municipio = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 3, 'Municipio');
+    await esperarCargaDireccionSiguiente(page, modalDireccion, 4, 'Localidad');
+
+    const localidad = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 4, 'Localidad');
+    await esperarCargaDireccionSiguiente(page, modalDireccion, 5, 'Sector');
+
+    const sector = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 5, 'Sector');
+
+    let regionValor = region.valor || await leerValorRapido(/^Regi(?:o|ó)n$/i);
     console.log(`[Direccion] Región seleccionada rapido=true valor='${regionValor}'`);
     if (valorInvalido(regionValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Región`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Provincia');
-    let provinciaValor = direccionResultados['Provincia'] || await leerValorRapido(/^Provincia$/i);
+    let provinciaValor = provincia.valor || await leerValorRapido(/^Provincia$/i);
     console.log(`[Direccion] Provincia seleccionada rapido=true valor='${provinciaValor}'`);
     if (valorInvalido(provinciaValor)) throw new Error(`[Direccion][CRITICO] Provincia quedó vacía después de seleccionar Región='${regionValor}'`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Municipio');
-    let municipioValor = direccionResultados['Municipio'] || await leerValorRapido(/^Municipio$/i);
+    let municipioValor = municipio.valor || await leerValorRapido(/^Municipio$/i);
     console.log(`[Direccion] Municipio seleccionado rapido=true valor='${municipioValor}'`);
     if (valorInvalido(municipioValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Municipio`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Localidad');
-    let localidadValor = direccionResultados['Localidad'] || await leerValorRapido(/^Localidad$/i);
+    let localidadValor = localidad.valor || await leerValorRapido(/^Localidad$/i);
     console.log(`[Direccion] Localidad seleccionada rapido=true valor='${localidadValor}'`);
     if (valorInvalido(localidadValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Localidad`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
 
     console.log('[Direccion] Seleccionando Sector');
-    let sectorValor = direccionResultados['Sector'] || await leerValorRapido(/^Sector$/i);
+    let sectorValor = sector.valor || await leerValorRapido(/^Sector$/i);
     console.log(`[Direccion] Sector seleccionado rapido=true valor='${sectorValor}'`);
     if (valorInvalido(sectorValor)) throw new Error(`[Direccion][CRITICO] No se pudo seleccionar Sector`);
     await page.waitForTimeout(FAST_UI ? 300 : 700);
