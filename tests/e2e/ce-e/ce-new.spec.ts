@@ -71,6 +71,40 @@ const capturas: string[] = [];
 const cumplimientoMpnsProcesados = new Set<string>();
 const plaftsSinManejadorLogueadas = new Set<string>();
 const productosConfirmadosPorRegistro = new Set<string>();
+const productoProcesadoPorRegistro = new Set<string>();
+
+const capturarPasoSeguro = async (page: Page, registro: RegistroExcel | null, paso: string): Promise<string | null> => {
+    try {
+        const id = registro?.identificacion || 'sin_identificacion';
+        const tipo = registro?.tipoCuenta || 'sin_tipo';
+        const safeTipo = String(tipo).replace(/[\\/:*?"<>|]/g, '_');
+        const safePaso = String(paso).replace(/[\\/:*?"<>|]/g, '_');
+        const file = path.join(process.cwd(), 'artifacts', 'evidencias_tmp', `${id}__${safeTipo}__${safePaso}.png`);
+        await page.screenshot({ path: file, fullPage: true });
+        console.log(`[Captura][Portal] ${safePaso}: ${file}`);
+        capturas.push(file);
+        return file;
+    } catch (e) {
+        console.log(`[Captura][Portal][WARN] No se pudo capturar ${paso}: ${String(e)}`);
+        return null;
+    }
+};
+
+const capturarPasoBizagiSeguro = async (bizagiPage: Page, mpn: string, paso: string): Promise<string | null> => {
+    try {
+        const safeMpn = String(mpn || 'sin_mpn').replace(/[\\/:*?"<>|]/g, '_');
+        const safePaso = String(paso).replace(/[\\/:*?"<>|]/g, '_');
+        const file = path.join(process.cwd(), 'artifacts', 'evidencias_tmp', `${safeMpn}__${safePaso}.png`);
+        await bizagiPage.screenshot({ path: file, fullPage: true });
+        console.log(`[Captura][Bizagi] ${safePaso}: ${file}`);
+        capturas.push(file);
+        return file;
+    } catch (e) {
+        console.log(`[Captura][Bizagi][WARN] No se pudo capturar ${paso}: ${String(e)}`);
+        return null;
+    }
+};
+
 const PORTAL_BASE_URL = (process.env.PW_PORTAL_URL ?? process.env.PORTAL_URL ?? 'https://srvqacgowb01.local.bsc.com:5000').replace(/\/+$/, '');
 const PORTAL_MULTIPRODUCT_URL = `${PORTAL_BASE_URL}/requests/create/multiproduct`;
 
@@ -519,6 +553,7 @@ async function confirmarCumplimientoAprobadoYContinuar(page: Page, mpn?: string)
         FAST_UI ? 8000 : 10000
     ).catch(() => false);
     if (aprobadoRapido) {
+        await capturarPasoSeguro(page, null, '03_portal_verificaciones_aprobadas_antes_siguiente');
         const clicRapido = await clickContinuarTrasAprobadoRapido(page).catch(() => false);
         if (!clicRapido) {
             throw new Error("[CRITICO] No se pudo hacer click en 'Continuar' despues de aprobar verificaciones.");
@@ -706,9 +741,16 @@ async function detectarBloquesVerificaciones(page: Page) {
 
 async function procesarVerificacionesEspeciales(page: Page) {
     const { badgeCumplimientoVisible, ofacBloque, plaftBloque, textoVerificacionesFallback } = await detectarBloquesVerificaciones(page);
-    const ofacPendiente = ofacBloque.presente;
-    const plaftPendiente = plaftBloque.presente;
+    let ofacPendiente = ofacBloque.presente;
+    let plaftPendiente = plaftBloque.presente;
     const verificacionesDetectadas = badgeCumplimientoVisible || ofacPendiente || plaftPendiente;
+    const normalizarTextoVerificaciones = (texto: string) =>
+        String(texto ?? '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toUpperCase()
+            .replace(/\s+/g, ' ')
+            .trim();
 
     console.log(`[Verificaciones] Pantalla/badge de verificaciones detectado=${verificacionesDetectadas}`);
     console.log(
@@ -716,7 +758,104 @@ async function procesarVerificacionesEspeciales(page: Page) {
     );
     if (badgeCumplimientoVisible && !ofacPendiente && !plaftPendiente && textoVerificacionesFallback) {
         console.log(`[Verificaciones][Diag][Fallback] textoVerificaciones='${textoVerificacionesFallback}'`);
+        const textoNormalizado = textoVerificacionesFallback
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toUpperCase();
+        const tieneListasOFAC = /LISTAS.*OFAC|OFAC.*LISTAS/i.test(textoNormalizado);
+        const tieneLexisNexis = /LEXIS.*NEXIS/i.test(textoNormalizado);
+        const tienePLAFT = /PLAFT/i.test(textoNormalizado);
+        const tieneEnEspera = /EN.*ESPERA/i.test(textoNormalizado);
+        if ((tieneListasOFAC || (tienePLAFT && tieneLexisNexis)) && tieneEnEspera) {
+            ofacPendiente = true;
+            plaftPendiente = true;
+            console.log('[Verificaciones][Fallback] badgeVisible=true texto contiene Listas OFAC, Lexis Nexis o PLAFT+Lexis+En espera; detectando OFAC=true PLAFT=true');
+        }
     }
+
+    if ((badgeCumplimientoVisible || verificacionesDetectadas) && !ofacPendiente && !plaftPendiente) {
+        const anclasScroll = [
+            page.getByText(/Verificaciones/i).first(),
+            page.getByText(/PLAFT/i).first(),
+            page.getByText(/Lexis\s+Nexis/i).first(),
+        ];
+        for (const ancla of anclasScroll) {
+            const visible = await ancla.isVisible().catch(() => false);
+            if (!visible) continue;
+            await ancla.scrollIntoViewIfNeeded().catch(() => { });
+            await page.waitForTimeout(FAST_UI ? 120 : 250);
+            break;
+        }
+
+        const paneles = page.locator('.p-panel:visible, .p-panel-content:visible, [data-pc-section="content"]:visible');
+        const totalPaneles = await paneles.count().catch(() => 0);
+        console.log(`[Verificaciones][PanelFallback] paneles visibles=${totalPaneles}`);
+
+        let textoPanelDetectado = '';
+        for (let i = 0; i < Math.min(totalPaneles, 12); i++) {
+            const panel = paneles.nth(i);
+            const textoPanel = ((await panel.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            if (!textoPanel) continue;
+            console.log(`[Verificaciones][PanelFallback] panel ${i + 1} texto='${textoPanel.slice(0, 500)}'`);
+            const textoNormalizado = normalizarTextoVerificaciones(textoPanel);
+            const tienePlaft = textoNormalizado.includes('PLAFT');
+            const tieneLexis = textoNormalizado.includes('LEXIS NEXIS');
+            const tieneOfac = textoNormalizado.includes('OFAC');
+            const tieneEnEspera = textoNormalizado.includes('EN ESPERA');
+            const matchPanel = (tieneLexis && tieneOfac && (tienePlaft || badgeCumplimientoVisible || verificacionesDetectadas))
+                || (tienePlaft && tieneLexis && tieneEnEspera);
+            if (matchPanel) {
+                textoPanelDetectado = textoPanel.slice(0, 500);
+                console.log(`[Verificaciones][PanelFallback] match PLAFT/Lexis/OFAC/EnEspera=${matchPanel}`);
+                ofacPendiente = tieneOfac && tieneLexis;
+                plaftPendiente = (tienePlaft && tieneLexis) || (tieneLexis && tieneOfac && (badgeCumplimientoVisible || verificacionesDetectadas));
+                break;
+            }
+        }
+
+        const ddOfacLexis = page
+            .locator('div[data-slot="dd"].font-bold')
+            .filter({ hasText: /OFAC.*Lexis Nexis|Lexis Nexis.*OFAC/i })
+            .first();
+        const ddVisible = await ddOfacLexis.isVisible().catch(() => false)
+            || await page.getByText(/OFAC,\s*Lexis\s+Nexis/i).first().isVisible().catch(() => false)
+            || await page.getByText(/Lexis\s+Nexis/i).first().isVisible().catch(() => false);
+        console.log(`[Verificaciones][PanelFallback] dd OFAC/Lexis visible=${ddVisible}`);
+
+        if (ddVisible) {
+            const ddTarget = await ddOfacLexis.isVisible().catch(() => false)
+                ? ddOfacLexis
+                : page.getByText(/OFAC,\s*Lexis\s+Nexis|Lexis\s+Nexis/i).first();
+            await ddTarget.scrollIntoViewIfNeeded().catch(() => { });
+            await page.waitForTimeout(FAST_UI ? 120 : 250);
+            const panelCercano = ddTarget.locator(
+                "xpath=ancestor::*[contains(@class,'p-panel') or contains(@class,'p-panel-content') or @data-pc-section='content' or self::div][1]"
+            ).first();
+            const textoCercano = ((await panelCercano.innerText().catch(() => '')) || (await ddTarget.innerText().catch(() => '')) || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 500);
+            console.log(`[Verificaciones][PanelFallback] texto cercano='${textoCercano}'`);
+            const textoNormalizado = normalizarTextoVerificaciones(textoCercano);
+            const tienePlaft = textoNormalizado.includes('PLAFT');
+            const tieneLexis = textoNormalizado.includes('LEXIS NEXIS');
+            const tieneOfac = textoNormalizado.includes('OFAC');
+            const tieneEnEspera = textoNormalizado.includes('EN ESPERA');
+            const matchPanel = (tieneLexis && tieneOfac && (tienePlaft || badgeCumplimientoVisible || verificacionesDetectadas))
+                || (tienePlaft && tieneLexis && tieneEnEspera);
+            console.log(`[Verificaciones][PanelFallback] match PLAFT/Lexis/OFAC/EnEspera=${matchPanel}`);
+            if (matchPanel) {
+                ofacPendiente = tieneOfac && tieneLexis;
+                plaftPendiente = (tienePlaft && tieneLexis) || (tieneLexis && tieneOfac && (badgeCumplimientoVisible || verificacionesDetectadas));
+                textoPanelDetectado = textoCercano;
+            }
+        }
+
+        if ((ofacPendiente || plaftPendiente) && textoPanelDetectado) {
+            console.log('[Verificaciones][Fallback] panel visible contiene Listas OFAC, Lexis Nexis; detectando OFAC=true PLAFT=true');
+        }
+    }
+
     console.log(`[Verificaciones] OFAC detectado=${ofacPendiente}`);
     console.log(`[Verificaciones] PLAFT detectado=${plaftPendiente}`);
     console.log(`[Cumplimiento] badgeVisible=${badgeCumplimientoVisible} url=${page.url()}`);
@@ -791,6 +930,7 @@ async function procesarVerificacionesEspeciales(page: Page) {
     });
     if (verificacionCumplimiento?.mpn) {
         cumplimientoMpnsProcesados.add(verificacionCumplimiento.mpn.toUpperCase());
+
         const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionCumplimiento.mpn);
         console.log(`[Cumplimiento] Solicitud abierta en Bizagi para: ${verificacionCumplimiento.mpn}`);
         console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
@@ -803,7 +943,7 @@ async function procesarVerificacionesEspeciales(page: Page) {
 async function intentarAvanceRealHaciaTaller(
     page: Page,
     contexto: string,
-    options?: { maxClicks?: number; tipoCuenta?: string }
+    options?: { maxClicks?: number; tipoCuenta?: string; registro?: RegistroExcel }
 ): Promise<ResultadoAvanceRelacionados> {
     const maxClicks = options?.maxClicks ?? 2;
 
@@ -812,15 +952,66 @@ async function intentarAvanceRealHaciaTaller(
             if (await modalConfiguracionProductoVisible(page).catch(() => false)) {
                 throw new Error('[Producto][CRITICO] Se intentó Continuar con modal de configuración abierto');
             }
-            const productoVisible = await productoAgregadoComoTarjetaVisible(page, options.tipoCuenta).catch(() => false);
-            console.log(`[Producto] Producto agregado como tarjeta final visible=${productoVisible}`);
-            if (!productoVisible) {
+
+            // Usar detector robusto de tarjetas .p-card
+            const registro = options.registro;
+            const keyProducto = registro
+                ? `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase()
+                : null;
+            const yaProcesado = keyProducto ? productoProcesadoPorRegistro.has(keyProducto) : false;
+
+            const normalizar = (s: string) =>
+                String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+            const nombreParcial = options.tipoCuenta
+                ? /(\d{3})\s*-\s*(.*?)(?:\s+DOP|\s+USD|\s+EUR|$)/i.exec(options.tipoCuenta)?.[2] || ''
+                : '';
+            const nombreParcialNormalizado = normalizar(nombreParcial);
+
+            const seccion = await localizarSeccionProductos(page).catch(() => null);
+            const seccionVisible = seccion ? await seccion.isVisible({ timeout: 1000 }).catch(() => false) : false;
+
+            let tarjetaProductoDetectada = false;
+            let mensajeVacioBloqueante = false;
+
+            if (seccion && seccionVisible) {
+                const textoScope = (await seccion.innerText({ timeout: 1200 }).catch(() => ''));
+
+                const tieneRelacionados = /RELACIONADOS|AÑADIR RELACIONADO/i.test(textoScope);
+                const posicionRelacionados = textoScope.toLowerCase().indexOf('relacionados');
+                const posicionNoResultados = textoScope.toLowerCase().indexOf('no se han encontrado resultados');
+                const mensajeVacioEsDeRelacionados = posicionRelacionados > 0 && posicionNoResultados > posicionRelacionados;
+
+                const cards = seccion.locator('.p-card:visible, .p-card-body:visible, [class*="p-card-content"]:visible');
+                const cardsCount = await cards.count().catch(() => 0);
+
+                for (let i = 0; i < Math.min(cardsCount, 3); i++) {
+                    const cardTexto = (await cards.nth(i).innerText().catch(() => '')).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+                    const tieneNombreEnCard = /NOMBRE/i.test(cardTexto);
+                    const tieneMonedaEnCard = /MONEDA|DOP|USD|EUR/i.test(cardTexto);
+                    const tieneBalanceEnCard = /BALANCE|PROMEDIO/i.test(cardTexto);
+                    const tieneTasaEnCard = /TASA/i.test(cardTexto);
+                    const tieneNombreParcialEnCard = nombreParcialNormalizado ? cardTexto.includes(nombreParcialNormalizado) : false;
+
+                    if (tieneNombreEnCard && (tieneMonedaEnCard || tieneBalanceEnCard || tieneTasaEnCard || tieneNombreParcialEnCard)) {
+                        tarjetaProductoDetectada = true;
+                        break;
+                    }
+                }
+
+                mensajeVacioBloqueante = mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada;
+            }
+
+            console.log(`[Producto][AvanceReal] yaProcesado=${yaProcesado} tarjetaProductoDetectada=${tarjetaProductoDetectada} mensajeVacioBloqueante=${mensajeVacioBloqueante}`);
+
+            const productoConfirmado = (yaProcesado || tarjetaProductoDetectada) && !mensajeVacioBloqueante;
+
+            console.log(`[Producto] Producto agregado como tarjeta final visible=${productoConfirmado}`);
+            if (!productoConfirmado) {
+                await diagnosticarPantallaProductoPostAgregar(page, options.tipoCuenta).catch(() => {});
                 throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
             }
-            console.log('[Producto] Producto ya estaba agregado, no se volverá a agregar');
-            console.log('[Producto] Evitando duplicar producto/cuenta');
-            console.log('[Producto] Continuando con producto ya confirmado');
-            console.log('[Producto] Producto confirmado, haciendo Continuar');
+            console.log('[Producto][AvanceReal] producto confirmado; haciendo click en Siguiente/Continuar');
         }
 
         const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch(() => null);
@@ -1133,7 +1324,7 @@ async function cerrarModalGestionDocumentalSiVisible(page: Page) {
     console.log('[GestionDoc][WARN] El modal documental no cerro de forma limpia dentro del timeout.');
     return false;
 }
-async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?: { maxIntentos?: number }) {
+async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?: { maxIntentos?: number }, registro?: RegistroExcel) {
     const maxIntentos = options?.maxIntentos ?? 3;
 
     // Si ya estamos en la pantalla de productos, no hacer nada
@@ -1533,9 +1724,10 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                         return false;
                     }
 
-                    // Ejecutar etapa post-selección
+// Ejecutar etapa post-selección
                     const seccionProductos = await localizarSeccionProductos(pageRef).catch(() => pageRef.locator('body'));
-                    await etapaSeccionProductosPostSeleccion(pageRef, { tipoCuenta, identificacion: 'TMP' } as unknown as RegistroExcel, seccionProductos).catch(() => { });
+                    const registroParaPost = registro ? registro : { tipoCuenta, identificacion: '', relacionado: '', cedRelacionado: '', filaOriginal: 0 } as unknown as RegistroExcel;
+                    await etapaSeccionProductosPostSeleccion(pageRef, registroParaPost, seccionProductos).catch(() => { });
 
                     console.log('[Producto][FallbackDirecto] Etapa post-selección completada');
                     return true;
@@ -1573,19 +1765,46 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                         console.log('[Producto] Forzando procesamiento basado en señales visuales confirmadas');
                     }
 
-                    // Validar si producto ya está agregado
-                    const tipoDesdeExcel = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '').then(t => {
-                        const match = t.match(/200\s*-\s*Cuentas?\s+de?\s+Ahorros?\s*(?:con\s+Libreta)?/i);
-                        return match ? match[0].trim() : '200 - Cuentas de Ahorros con Libreta DOP';
-                    }).catch(() => '200 - Cuentas de Ahorros con Libreta DOP');
+                    if (!registro?.identificacion || !registro?.tipoCuenta?.trim()) {
+                        throw new Error(`[Producto][CRITICO] Ruta Producto sin registro/tipoCuenta. No se permite fallback a 200. registro=${registro?.identificacion ?? 'N/A'}, tipoCuenta=${registro?.tipoCuenta ?? 'N/A'}`);
+                    }
 
-                    const tipoACargar = await tipoDesdeExcel;
+// Validar si producto ya está agregado
+                    const tipoDesdeExcel = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '').then(t => {
+                        // Usar registro.tipoCuenta si está disponible
+                        const tipoObj = registro?.tipoCuenta?.trim();
+                        if (tipoObj) return tipoObj;
+                        throw new Error('[Producto][CRITICO] registro.tipoCuenta no disponible, fallback a 200 no permitido');
+                    }).catch((e) => {
+                        throw new Error(`[Producto][CRITICO] Fallback a 200 no permitido: ${String(e)}`);
+                    });
+
+                    const tipoACargar = tipoDesdeExcel;
+                    const keyProducto = `${String(registro?.identificacion ?? '').trim()}|${String(tipoACargar).trim()}`.toUpperCase();
+                    console.log(`[Producto][Target] registro=${registro?.identificacion ?? 'N/A'} tipoCuentaObjetivo='${tipoACargar}' key=${keyProducto}`);
+
+                    if (productoProcesadoPorRegistro.has(keyProducto)) {
+                        console.log(`[Producto][GuardUnico] Producto ya procesado para key=${keyProducto}; no se volverá a seleccionar/agregar`);
+                    } else {
+                        console.log(`[Producto][GuardUnico] key=${keyProducto} no procesado, continuando`);
+                    }
+
                     console.log(`[Producto] Tipo de cuenta a cargar: ${tipoACargar}`);
 
                     // Verificar si producto ya está agregado
                     console.log('[Producto][Trace] verificando si producto ya está agregado');
-                    const productoYaAgregado = await productoAgregadoVisible(page, tipoACargar).catch(() => false);
-if (productoYaAgregado) {
+                    const productoYaAgregado = await Promise.race([
+                        productoAgregadoComoTarjetaVisible(page, tipoACargar),
+                        new Promise<boolean>((resolve) => setTimeout(() => {
+                            console.log('[Producto][GuardEstricto][WARN] timeout verificando productoYaAgregado; se asumirá NO agregado');
+                            resolve(false);
+                        }, 2500))
+                    ]).catch((e) => {
+                        console.log(`[Producto][GuardEstricto][WARN] error verificando productoYaAgregado: ${String(e)}; se asumirá NO agregado`);
+                        return false;
+                    });
+                    console.log(`[Producto][Trace] productoYaAgregadoFinal=${productoYaAgregado}`);
+                    if (productoYaAgregado) {
                         console.log('[Producto] Producto ya está agregado, saltando agregación');
                     } else {
                         // Usar estrategia legacy de localización que funciona en Certificado-ex.spec.ts
@@ -1601,7 +1820,7 @@ if (productoYaAgregado) {
                             ]);
                         };
 
-                        console.log('[Producto][Legacy][Trace] antes de localizeSeccionProductosLegacySeguro');
+                        console.log('[Producto][Legacy][Trace] antes de localizarSeccionProductosLegacySeguro');
                         let seccion: Locator | null = null;
                         let tiempoAgotado = false;
                         try {
@@ -1612,7 +1831,7 @@ if (productoYaAgregado) {
                             console.log(`[Producto][Legacy][Trace] error en localizeWithTimeout: ${e}`);
                         }
                         const despuesOk = !!seccion && !(seccion === null);
-                        console.log(`[Producto][Legacy][Trace] despues de localizeSeccionProductosLegacySeguro ok=${despuesOk} timeout=${tiempoAgotado}`);
+                        console.log(`[Producto][Legacy][Trace] despues de localizarSeccionProductosLegacySeguro ok=${despuesOk} timeout=${tiempoAgotado}`);
 
                         let scopeNombre = 'legacy';
                         let usarBandaVisual = false;
@@ -1680,13 +1899,38 @@ if (productoYaAgregado) {
                             const bandaReconsulta = await esperarDropdownsProductosListos(page);
                             console.log('[Producto][Banda] usando segundo dropdown como Producto');
 
-                            console.log(`[Producto][Banda] Seleccionando Producto: ${tipoACargar}`);
+                            console.log(`[Producto][Banda] Seleccionando Producto desde Excel: ${tipoACargar}`);
+                            const codigoProducto = (tipoACargar.match(/^\s*(\d{3})\b/) || [])[1];
+                            const productoRegex = new RegExp(`^\\s*${codigoProducto || ''}\\s*-`, 'i');
                             const valorProducto = await seleccionarOpcionEnDropdownDirecto(
                                 page,
                                 bandaReconsulta.producto,
-                                /200\s*-\s*Cuentas\s+de\s+Ahorros\s+con\s+Libreta\s+DOP/i,
+                                productoRegex,
                                 'Producto][Banda][Producto'
                             );
+
+                            const normalizar = (s: string) =>
+                                String(s ?? '')
+                                    .normalize('NFD')
+                                    .replace(/[\u0300-\u036f]/g, '')
+                                    .replace(/\s+/g, ' ')
+                                    .trim()
+                                    .toUpperCase();
+
+                            const excelNormalizado = normalizar(tipoACargar);
+                            const seleccionadoNormalizado = normalizar(valorProducto);
+
+                            if (!seleccionadoNormalizado || /^(\s*|-)+$/.test(seleccionadoNormalizado)) {
+                                throw new Error(`[Producto][CRITICO] Producto quedó vacío después de selección desde Excel. excel='${tipoACargar}'`);
+                            }
+
+                            const esValido = seleccionadoNormalizado === excelNormalizado ||
+                                seleccionadoNormalizado.startsWith(`${codigoProducto} -`);
+
+                            if (!esValido) {
+                                throw new Error(`[Producto][CRITICO] Producto seleccionado no coincide con Excel. excel='${tipoACargar}' seleccionado='${valorProducto}'`);
+                            }
+
                             console.log(`[Producto][Banda] Producto seleccionado valor='${valorProducto}'`);
 
                             const modalProd = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
@@ -1725,9 +1969,9 @@ if (productoYaAgregado) {
                             }
                         }
 
-                        // Post-selección (común a ambas rutas)
+// Post-selección (común a ambas rutas)
                         const seccionParaPostSeleccion = seccion ?? await localizarSeccionProductos(page);
-                        await etapaSeccionProductosPostSeleccion(page, { tipoCuenta: tipoACargar, identificacion: 'TMP' } as unknown as RegistroExcel, seccionParaPostSeleccion);
+                        await etapaSeccionProductosPostSeleccion(page, registro, seccionParaPostSeleccion);
 
                         const urlDespuesPostSeleccion = page.url();
                         console.log(`[Producto][Guard] despues de post-seleccion url=${urlDespuesPostSeleccion}`);
@@ -2206,28 +2450,58 @@ async function seleccionarOpcionEnDropdownDirecto(
         throw new Error(`[${nombreLog}][CRITICO] No se pudo abrir panel del dropdown`);
     }
 
-    const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+    // Loguear opciones visibles
+    const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"], .p-select-option');
     await items.first().waitFor({ state: 'visible', timeout: LIST_PANEL_TIMEOUT_LOCAL }).catch(() => {});
+    const countItems = await items.count().catch(() => 0);
+    const opcionesVisibles: string[] = [];
+    for (let i = 0; i < Math.min(countItems, 15); i++) {
+        const txt = (await items.nth(i).innerText().catch(() => '')).trim();
+        if (txt) opcionesVisibles.push(txt);
+    }
+    console.log(`[${nombreLog}] opciones visibles=[${opcionesVisibles.join(', ')}]`);
 
+    // Buscar opción con regex
     const itemTarget = items.filter({ hasText: opcionRegex }).first();
     const itemVisible = await itemTarget.isVisible().catch(() => false);
 
+    // Si no encuentra, intentar filtro por código de 3 dígitos
     if (!itemVisible) {
-        const countItems = await items.count().catch(() => 0);
-        const primeras: string[] = [];
-        for (let i = 0; i < Math.min(countItems, 8); i++) {
-            const txt = (await items.nth(i).innerText().catch(() => '')).trim();
-            if (txt) primeras.push(txt);
+        const codigoMatch = opcionRegex.source.match(/^(\d{3})/);
+        if (codigoMatch) {
+            const codigo = codigoMatch[1];
+            console.log(`[${nombreLog}] opción no encontrada, intentando filtro por código=${codigo}`);
+            const filtroRegex = new RegExp(`^\\s*${codigo}\\s*-`, 'i');
+            const itemFiltrado = items.filter({ hasText: filtroRegex }).first();
+            const itemFiltradoVisible = await itemFiltrado.isVisible().catch(() => false);
+            if (itemFiltradoVisible) {
+                const opcionesTrasFiltro: string[] = [];
+                for (let i = 0; i < Math.min(countItems, 15); i++) {
+                    const txt = (await items.nth(i).innerText().catch(() => '')).trim();
+                    if (txt && filtroRegex.test(txt)) opcionesTrasFiltro.push(txt);
+                }
+                console.log(`[${nombreLog}] opciones tras filtro=[${opcionesTrasFiltro.join(', ')}]`);
+            }
         }
-        throw new Error(`[${nombreLog}][CRITICO] Opción no encontrada en panel. regex=${opcionRegex} opciones=[${primeras.join(', ')}]`);
     }
 
-    await itemTarget.click({ force: true });
-    await page.waitForTimeout(120);
+    if (!itemVisible) {
+        throw new Error(`[${nombreLog}][CRITICO] Opción no encontrada en panel. regex=${opcionRegex} opciones=[${opcionesVisibles.join(', ')}]`);
+    }
 
+    // Guardar texto real de la opción antes del click
+    const textoOpcionReal = ((await itemTarget.innerText().catch(() => '')) || '').trim();
+    console.log(`[${nombreLog}] opción seleccionada desde lista='${textoOpcionReal}'`);
+
+    await itemTarget.click({ force: true });
+    await page.waitForTimeout(150);
+
+    // Si hay modal abierto, el label puede estar vacío, pero retornamos el texto de la opción clickeada
     const labelEl = dropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
-    const valorSeleccionado = ((await labelEl.textContent().catch(() => '')) || '').trim();
-    return valorSeleccionado;
+    const valorLabel = ((await labelEl.textContent().catch(() => '')) || '').trim();
+
+    // Retornar el texto de la opción si el label está vacío (modal abierto), si no el label
+    return valorLabel || textoOpcionReal;
 }
 
 async function seleccionarCategoriaEnSeccionProductosLegacy(page: Page, seccionProductos: Locator) {
@@ -2776,7 +3050,31 @@ async function clickDepurarRobusto(page: Page, motivo = "") {
     }
 }
 
-async function asegurarSeccionContactosDisponible(page: Page) {
+async function detectarYCerrarClienteProspectoNoProcesable(page: Page): Promise<boolean> {
+    const modal = page.locator('.p-dialog:visible, [role="dialog"]:visible').filter({
+        hasText: /Cliente es prospecto|Código de cliente no registrado|cliente no está activo|No es posible continuar el proceso por esta vía/i
+    }).first();
+
+    const visible = await modal.isVisible({ timeout: 1500 }).catch(() => false);
+    if (!visible) return false;
+
+    console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto detectado: cliente no registrado o no activo');
+
+    const cerrar = modal.getByRole('button', { name: /Cerrar/i }).first();
+    if (await cerrar.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await cerrar.click();
+        await modal.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+        console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado');
+    } else {
+        await page.keyboard.press('Escape').catch(() => {});
+        await modal.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
+        console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado con Escape/fallback');
+    }
+
+    return true;
+}
+
+async function asegurarSeccionContactosDisponible(page: Page, identificacion?: string) {
     const btnAnadirContacto = getBotonAnadirContacto(page);
     const seccionContactos = getSeccionContactos(page);
     for (let intento = 1; intento <= 4; intento++) {
@@ -2822,9 +3120,9 @@ async function asegurarSeccionContactosDisponible(page: Page) {
         }
 
         if (intento === 3) {
-            console.log('[ClienteNuevo][WARN] Contactos sigue sin aparecer en intento 3. Recargando pagina...');
-            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-            await esperarFinActualizandoSolicitud(page, 30000).catch(() => {});
+            const idMsg = identificacion ? ` para '${identificacion}'` : '';
+            console.log(`[ClienteNuevo][WARN] Contactos sigue sin aparecer en intento 3${idMsg}. Lanzando reintento de registro...`);
+            throw new Error(`[REINTENTAR_REGISTRO][CONTACTOS_NO_VISIBLE] Contactos no apareció tras Depurar${idMsg}`);
         }
     }
 
@@ -3720,7 +4018,32 @@ async function completarDatosClienteNuevo(page: Page) {
                     correoAgregado = true;
                     break;
                 }
-                const correoConfirmado = await validarContactoAgregadoEnSeccion(page, correo, 'correo', { strict: false });
+
+                const normalizar = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const correoNorm = normalizar(correo);
+                let correoConfirmado = false;
+                for (let intento = 1; intento <= 4; intento++) {
+                    console.log(`[ClienteNuevo][Correo] verificando correo agregado intento ${intento}/4`);
+                    const bodyText = ((await page.locator('body').innerText({ timeout: 2000 }).catch(() => '')) || '');
+                    const bodyNorm = normalizar(bodyText);
+                    if (bodyNorm.includes(correoNorm)) {
+                        console.log(`[ClienteNuevo][Correo] correo confirmado por body normalizado intento=${intento}`);
+                        correoConfirmado = true;
+                        break;
+                    }
+                    const [usuario, dominio] = correo.split('@');
+                    if (usuario && dominio && bodyNorm.includes(normalizar(usuario)) && bodyNorm.includes(normalizar(dominio))) {
+                        console.log(`[ClienteNuevo][Correo] correo confirmado por usuario/dominio intento=${intento}`);
+                        correoConfirmado = true;
+                        break;
+                    }
+                    await page.waitForTimeout(600);
+                }
+
+                if (!correoConfirmado) {
+                    correoConfirmado = await validarContactoAgregadoEnSeccion(page, correo, 'correo', { strict: false }).catch(() => false);
+                }
+
                 if (!correoConfirmado) {
                     const existeCorreoFallback = await existeCorreoEnPagina(page, correo);
                     if (!existeCorreoFallback) {
@@ -3810,6 +4133,14 @@ async function completarDatosClienteNuevo(page: Page) {
     await llenarInputEnScope(modalLaboral, /N[uú]mero casa.*edificio/i, String(randomInt(1, 999)));
     await llenarInputEnScope(modalLaboral, /N[uú]mero apartamento/i, String(randomInt(1, 80)));
     await seleccionarDropdownIndexEnScope(page, modalLaboral, /^Regi(?:o|\u00f3)n$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
+
+    await page.waitForTimeout(FAST_UI ? 800 : 1500);
+
+    const provinciaDropdown = modalLaboral.locator('label').filter({ hasText: /^Provincia$/i }).first();
+    const provinciaVisible = await provinciaDropdown.isVisible().catch(() => false);
+    if (!provinciaVisible) {
+        console.log('[ClienteNuevo][Provincia] dropdown no visible, reintentando...');
+    }
     await seleccionarDropdownIndexEnScope(page, modalLaboral, /^Provincia$/i, 0, { maxIntentos: 3, timeoutMs: 2500, panelTimeoutMs: 3000 });
 
     await seleccionarDropdownDependienteConEspera(page, modalLaboral, /^Municipio$/i, 0, {
@@ -4775,7 +5106,8 @@ async function asegurarPantallaPostProductoAntesDeTaller(page: Page) {
 
 async function completarInformacionClientePostProductoAntesDeTaller(
     page: Page,
-    options?: { required?: boolean }
+    options?: { required?: boolean },
+    registro?: RegistroExcel
 ) {
     const required = options?.required ?? false;
     const gatillo = await asegurarPantallaPostProductoAntesDeTaller(page);
@@ -4851,6 +5183,7 @@ async function completarInformacionClientePostProductoAntesDeTaller(
     console.log(`[PostProducto][Tiempo] Referencia personal lista en ${Date.now() - inicioReferencia}ms`);
 
     console.log(`[PostProducto] Informacion del cliente completada antes de Taller. total=${Date.now() - inicioPostProducto}ms`);
+    if (registro) await capturarPasoSeguro(page, registro, '04_portal_post_producto_completo_antes_taller');
     return true;
 }
 
@@ -4950,6 +5283,12 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
 
         await clickDepurarRobusto(page, 'primero');
 
+        const esProspecto = await detectarYCerrarClienteProspectoNoProcesable(page);
+        if (esProspecto) {
+            console.log(`[ClienteNuevo][SKIP] Omitiendo registro '${registro.identificacion}' por cliente prospecto/no activo`);
+            throw new Error(`[OMITIDO] Cliente prospecto/no activo para '${registro.identificacion}'`);
+        }
+
         const mpnCasoActivo = await extraerCasoActivoMpn(page);
         if (mpnCasoActivo) {
             console.log(`[CasoActivo] Detectado ${mpnCasoActivo}. Cancelando en Bizagi...`);
@@ -4986,7 +5325,7 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             }
         }
 
-        const estaEnPasoDatosCliente = await asegurarSeccionContactosDisponible(page);
+        const estaEnPasoDatosCliente = await asegurarSeccionContactosDisponible(page, registro.identificacion);
         if (!estaEnPasoDatosCliente) {
             const mpnCasoActivoTardio = await extraerCasoActivoMpn(page);
             if (mpnCasoActivoTardio) {
@@ -5010,10 +5349,12 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             throw new Error("[CRITICO] No se pudo abrir/completar la seccion de datos del cliente nuevo despues de Depurar.");
         }
 
-        // Llenar campos adicionales visibles (Nivel de estudio, Tipo de vivienda, etc.) antes de avanzar
-        await etapaValidacionesPrevias(page);
+        await capturarPasoSeguro(page, registro, '01_portal_primera_pantalla_completa_antes_siguiente');
 
-        await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 3 });
+        // Llenar campos adicionales visibles (Nivel de estudio, Tipo de vivienda, etc.) antes de avanzar
+        await etapaValidacionesPrevias(page, registro);
+
+        await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 3 }, registro);
         await page.waitForTimeout(FAST_UI ? 250 : 800);
         return;
     }
@@ -5021,7 +5362,7 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
     throw new Error(`[CRITICO] No se pudo completar etapa inicial para '${registro.identificacion}' tras reintentos.`);
 }
 
-async function etapaValidacionesPrevias(page: Page) {
+async function etapaValidacionesPrevias(page: Page, registro?: RegistroExcel) {
     let hizoValidaciones = false;
     const hizoTiempoExclusion = await llenarFechaSiVisibleYVacia(page, "Tiempo de exclusion", "16-08-2030", { debug: true });
     if (hizoTiempoExclusion) hizoValidaciones = true;
@@ -5079,7 +5420,7 @@ async function etapaValidacionesPrevias(page: Page) {
     }
 
     if (hizoValidaciones) {
-        await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 3 });
+        await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 3 }, registro);
     }
 }
 
@@ -5386,6 +5727,8 @@ async function finalizarSolicitudSiPendienteLegacy(
     const yaFinalizada = await estadoSolicitudFinalizadaVisible(page);
     if (yaFinalizada) return true;
 
+    await capturarPasoSeguro(page, registro, '05_portal_taller_campos_completos_antes_finalizar');
+
     for (let intento = 1; intento <= maxIntentos; intento++) {
         if (Date.now() - inicio >= timeoutMs) break;
         console.log(`[Finalizacion][${registro.identificacion}] Intento ${intento}/${maxIntentos} para finalizar solicitud.`);
@@ -5593,6 +5936,9 @@ async function productoAgregadoComoTarjetaVisible(page: Page, tipoCuenta: string
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     if (await msgSinProductos.isVisible().catch(() => false)) return false;
 
+    const msgSinResultados = page.getByText(/No se han encontrado resultados/i).first();
+    if (await msgSinResultados.isVisible().catch(() => false)) return false;
+
     const tipoCuentaSafe = String(tipoCuenta ?? '').trim();
     if (!tipoCuentaSafe) return false;
 
@@ -5604,9 +5950,15 @@ async function productoAgregadoComoTarjetaVisible(page: Page, tipoCuenta: string
 
     const seccionProductos = await localizarSeccionProductos(page);
     const seccionVisible = await seccionProductos.isVisible().catch(() => false);
-    const scope = seccionVisible ? seccionProductos : page.locator('body');
 
-    return scope.evaluate((root, payload) => {
+    if (!seccionVisible) {
+        console.log('[Producto][Tarjeta][DIAG] seccionProductos no visible; return false para evitar falso positivo');
+        return false;
+    }
+
+    console.log(`[Producto][Tarjeta] buscando en seccionProductos visible para tipoCuenta='${tipoCuentaSafe}'`);
+
+    return seccionProductos.evaluate((root, payload) => {
         const normalize = (value: string) =>
             String(value ?? '')
                 .normalize('NFD')
@@ -5705,12 +6057,64 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
         await etapaSeccionProductosPostSeleccion(page, registro, seccionProductos);
     }
 
-    const productoVisible = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
+    // Usar detector robusto de tarjetas .p-card
+    const keyProducto = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+    const yaProcesado = productoProcesadoPorRegistro.has(keyProducto);
+    const normalizar = (s: string) =>
+        String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+    const nombreParcial = /(\d{3})\s*-\s*(.*?)(?:\s+DOP|\s+USD|\s+EUR|$)/i.exec(registro.tipoCuenta)?.[2] || '';
+    const nombreParcialNormalizado = normalizar(nombreParcial);
+
+    const seccion = await localizarSeccionProductos(page).catch(() => null);
+    const seccionVisible = seccion ? await seccion.isVisible({ timeout: 1000 }).catch(() => false) : false;
+
+    let tarjetaProductoDetectada = false;
+    let mensajeVacioBloqueante = false;
+
+    if (seccion && seccionVisible) {
+        const textoScope = (await seccion.innerText({ timeout: 1200 }).catch(() => ''));
+        const norm = normalizar(textoScope);
+
+        const tieneRelacionados = /RELACIONADOS|AÑADIR RELACIONADO/i.test(textoScope);
+        const posicionRelacionados = textoScope.toLowerCase().indexOf('relacionados');
+        const posicionNoResultados = textoScope.toLowerCase().indexOf('no se han encontrado resultados');
+        const mensajeVacioEsDeRelacionados = posicionRelacionados > 0 && posicionNoResultados > posicionRelacionados;
+
+        const cards = seccion.locator('.p-card:visible, .p-card-body:visible, [class*="p-card-content"]:visible');
+        const cardsCount = await cards.count().catch(() => 0);
+
+        for (let i = 0; i < Math.min(cardsCount, 3); i++) {
+            const cardTexto = (await cards.nth(i).innerText().catch(() => '')).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+            const tieneNombreEnCard = /NOMBRE/i.test(cardTexto);
+            const tieneMonedaEnCard = /MONEDA|DOP|USD|EUR/i.test(cardTexto);
+            const tieneBalanceEnCard = /BALANCE|PROMEDIO/i.test(cardTexto);
+            const tieneTasaEnCard = /TASA/i.test(cardTexto);
+            const tieneNombreParcialEnCard = nombreParcialNormalizado ? cardTexto.includes(nombreParcialNormalizado) : false;
+
+            if (tieneNombreEnCard && (tieneMonedaEnCard || tieneBalanceEnCard || tieneTasaEnCard || tieneNombreParcialEnCard)) {
+                tarjetaProductoDetectada = true;
+                break;
+            }
+        }
+
+        mensajeVacioBloqueante = mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada;
+    }
+
+    console.log(`[Producto] Producto agregado como tarjeta final robusto yaProcesado=${yaProcesado} tarjetaProductoDetectada=${tarjetaProductoDetectada} mensajeVacioBloqueante=${mensajeVacioBloqueante}`);
+
+    const productoVisible = (yaProcesado || tarjetaProductoDetectada) && !mensajeVacioBloqueante;
+
     console.log(`[Producto] Producto agregado como tarjeta final visible=${productoVisible}`);
     if (!productoVisible) {
+        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
         throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
     }
-    marcarProductoConfirmado(registro);
+
+    if (!yaProcesado) {
+        marcarProductoConfirmado(registro);
+    }
+    await capturarPasoSeguro(page, registro, '02_portal_producto_agregado_antes_siguiente');
     console.log('[Producto] Producto confirmado, ahora si se puede Continuar hacia Verificaciones');
 }
 
@@ -6058,30 +6462,393 @@ async function seleccionarProductoEnSeccionProductos(
         return;
     }
     console.log(`[SeccionProductos] Iniciando seleccion de producto: '${tipoCuenta}'`);
-    return seleccionarProductoCuentaEfectivoNuevo(page, seccionProductos, tipoCuenta, {
-        confirmarSeleccionProductoRapida,
-        detectarProductoSeleccionadoEnUI,
-        esValorDropdownVacio,
-        escapeRegexText,
-        extraerCodigoProducto,
-        extraerNombreProducto,
-        leerValorDropdownEnScope,
-        seleccionarDropdownEnScopePorTexto,
-        seleccionarProductoPorDropdownSecundario,
-        seleccionarProductoConFiltroEnDropdownSecundario,
-        beforeAttempt: async (currentPage) => {
-            console.log('[SeccionProductos] beforeAttempt: verificando estado de la UI...');
-            if (await modalProductoConfigVisible(currentPage)) {
-                console.log('[SeccionProductos] Modal de configuracion ya visible.');
-                return;
-            }
-            await cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false);
-            await clickReintentarListaSiVisible(currentPage, 'Producto', LIST_RETRY_CLICK_TIMEOUT).catch(() => false);
-        },
-        maxIntentos: PRODUCTO_MAX_INTENTOS,
-        probeTimeoutMs: LIST_PROBE_TIMEOUT,
-        retryWaitMs: PRODUCTO_RETRY_WAIT_MS,
+    console.log(`[Producto][Trace] antes de seleccionarProductoCuentaEfectivoNuevo tipoCuenta='${tipoCuenta}'`);
+
+    let productoSeleccionFinalizado = false;
+    const seleccionFn = async () => {
+        const result = await seleccionarProductoCuentaEfectivoNuevo(page, seccionProductos, tipoCuenta, {
+            confirmarSeleccionProductoRapida,
+            detectarProductoSeleccionadoEnUI,
+            esValorDropdownVacio,
+            escapeRegexText,
+            extraerCodigoProducto,
+            extraerNombreProducto,
+            leerValorDropdownEnScope,
+            seleccionarDropdownEnScopePorTexto,
+            seleccionarProductoPorDropdownSecundario,
+            seleccionarProductoConFiltroEnDropdownSecundario,
+            beforeAttempt: async (currentPage) => {
+                console.log('[SeccionProductos] beforeAttempt: verificando estado de la UI...');
+                if (await modalProductoConfigVisible(currentPage)) {
+                    console.log('[SeccionProductos] Modal de configuracion ya visible.');
+                    return;
+                }
+                await cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false);
+                await clickReintentarListaSiVisible(currentPage, 'Producto', LIST_RETRY_CLICK_TIMEOUT).catch(() => false);
+            },
+            maxIntentos: PRODUCTO_MAX_INTENTOS,
+            probeTimeoutMs: LIST_PROBE_TIMEOUT,
+            retryWaitMs: PRODUCTO_RETRY_WAIT_MS,
+        });
+        productoSeleccionFinalizado = true;
+        return result;
+    };
+
+    const timeoutFn = async () => {
+        await page.waitForTimeout(8000);
+        if (!productoSeleccionFinalizado) {
+            console.log('[Producto][Trace][WARN] timeout en seleccionarProductoCuentaEfectivoNuevo; continuando sin producto seleccionado');
+            return false;
+        }
+        return true;
+    };
+
+const seleccionProductoOk = await Promise.race([
+        seleccionFn(),
+        timeoutFn(),
+    ]).catch((e) => {
+        productoSeleccionFinalizado = true;
+        console.log(`[Producto][Trace][WARN] error en seleccionarProductoCuentaEfectivoNuevo: ${String(e)}; continuando sin producto seleccionado`);
+        return false;
     });
+
+    console.log(`[Producto][Trace] despues de seleccionarProductoCuentaEfectivoNuevo ok=${seleccionProductoOk}`);
+
+    const modalProductoTrasSeleccion = await modalConfiguracionProductoVisible(page).catch(() => false);
+    console.log(`[Producto][Trace] modalProductoTrasSeleccion=${modalProductoTrasSeleccion}`);
+
+    if (modalProductoTrasSeleccion) {
+        console.log('[Producto][Trace] modal de configuración visible tras selección; no se ejecuta fallback directo');
+    } else if (!seleccionProductoOk) {
+        console.log(`[Producto][FallbackDirecto] iniciando fallback directo para tipoCuenta='${tipoCuenta}'`);
+
+        const seccionActual = await localizarSeccionProductos(page).catch(() => seccionProductos);
+
+        const dropdowns = seccionActual.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const count = await dropdowns.count().catch(() => 0);
+        console.log(`[Producto][FallbackDirecto] dropdowns visibles=${count}`);
+
+        let dropdownProducto: Locator | null = null;
+
+        if (count >= 2) {
+            dropdownProducto = dropdowns.nth(1);
+            console.log('[Producto][FallbackDirecto] usando segundo dropdown como Producto');
+        } else if (count === 1) {
+            dropdownProducto = dropdowns.nth(0);
+            console.log('[Producto][FallbackDirecto] usando único dropdown visible como Producto');
+        }
+
+        if (!dropdownProducto) {
+            throw new Error(`[Producto][CRITICO] No se encontró dropdown Producto para fallback directo tipoCuenta='${tipoCuenta}'`);
+        }
+
+        await dropdownProducto.click({ timeout: 3000 }).catch(async () => {
+            await dropdownProducto.click({ force: true, timeout: 3000 });
+        });
+
+        const panel = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
+        const panelVisible = await panel.isVisible({ timeout: 5000 }).catch(() => false);
+        if (!panelVisible) {
+            throw new Error(`[Producto][CRITICO] No abrió panel Producto en fallback directo tipoCuenta='${tipoCuenta}'`);
+        }
+
+        const opciones = panel.locator('li[role="option"], .p-dropdown-item, .p-select-option');
+        const total = await opciones.count().catch(() => 0);
+        const textos: string[] = [];
+        for (let i = 0; i < total; i++) {
+            textos.push(((await opciones.nth(i).innerText().catch(() => '')) || '').trim());
+        }
+        console.log(`[Producto][FallbackDirecto] opciones=${JSON.stringify(textos.slice(0, 20))}`);
+
+        const normalizar = (s: string) =>
+            s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+        const tipoNorm = normalizar(tipoCuenta);
+        const codigo = (tipoCuenta.match(/^\s*(\d{3})\b/) || [])[1];
+
+        let indexMatch = textos.findIndex(t => normalizar(t) === tipoNorm);
+        let matchExacto = indexMatch >= 0;
+        let codigoFallback = false;
+
+        if (indexMatch < 0) {
+            const regexTipo = new RegExp(tipoCuenta.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i');
+            indexMatch = textos.findIndex(t => regexTipo.test(t));
+        }
+
+        if (indexMatch < 0 && codigo) {
+            indexMatch = textos.findIndex(t => new RegExp(`\\b${codigo}\\b`).test(t));
+            codigoFallback = indexMatch >= 0;
+        }
+
+        if (indexMatch < 0) {
+            throw new Error(`[Producto][CRITICO] No se encontró opción Producto en fallback directo tipoCuenta='${tipoCuenta}'`);
+        }
+
+        console.log(`[Producto][FallbackDirecto] matchExacto=${matchExacto} codigoFallback=${codigoFallback} opcion='${textos[indexMatch]}'`);
+
+        await opciones.nth(indexMatch).click({ timeout: 3000 }).catch(async () => {
+            await opciones.nth(indexMatch).click({ force: true, timeout: 3000 });
+        });
+
+        console.log('[Producto][FallbackDirecto] click aplicado');
+
+        const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+        console.log(`[Producto][FallbackDirecto] modalConfiguracionProductoVisible=${modalVisible}`);
+
+        if (!modalVisible) {
+            throw new Error(`[Producto][CRITICO] Producto no abrió modal tras fallback directo tipoCuenta='${tipoCuenta}'`);
+        }
+    }
+
+    const validarProductoSeleccionado = async () => {
+        const seccion = await localizarSeccionProductos(page).catch(() => page.locator('body'));
+        const dropdowns = seccion.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const count = await dropdowns.count().catch(() => 0);
+        if (count < 2) return { vacio: true, valor: '' };
+        const dropdownProducto = dropdowns.nth(1);
+        const labelEl = dropdownProducto.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+        const valor = ((await labelEl.textContent().catch(() => '')) || '').trim();
+        const vacio = !valor || /^seleccione|^--/i.test(valor);
+        return { vacio, valor };
+    };
+
+    let estadoProducto = await validarProductoSeleccionado();
+    console.log(`[Producto][Seleccion] valorProductoDespues='${estadoProducto.valor}'`);
+
+    const modalProductoAbierto = await modalConfiguracionProductoVisible(page).catch(() => false);
+    if (modalProductoAbierto) {
+        console.log('[Producto][Seleccion] modal de configuración visible; producto seleccionado correctamente aunque dropdown visual esté vacío');
+        return;
+    }
+
+    if (estadoProducto.vacio) {
+        console.log(`[Producto][Seleccion][WARN] Producto quedó vacío tras selección; reintentando`);
+        for (let intento = 1; intento <= 2; intento++) {
+            console.log(`[Producto][Seleccion] reintento ${intento}/2 para tipoCuenta='${tipoCuenta}'`);
+            const seccion = await localizarSeccionProductos(page).catch(() => page.locator('body'));
+            const dropdowns = seccion.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+            const dropdownProducto = dropdowns.nth(1);
+            await dropdownProducto.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(400);
+            const panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').first();
+            const panelVisible = await panel.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+            if (!panelVisible) {
+                console.log(`[Producto][Seleccion][WARN] Panel no se abrió en intento ${intento}`);
+                continue;
+            }
+            const items = panel.locator("li[role='option'], .p-dropdown-item, [data-pc-section='item']");
+            const opciones = [];
+            for (let k = 0; k < await items.count().catch(() => 0); k++) {
+                const txt = ((await items.nth(k).textContent().catch(() => '')) || '').trim();
+                opciones.push(txt);
+            }
+            console.log(`[Producto][Seleccion] opciones=${JSON.stringify(opciones.slice(0, 5))}`);
+            const codigoInicial = tipoCuenta.split('-')[0].trim();
+            const normalizar = (txt: string) => txt.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const tipoNormalizado = normalizar(tipoCuenta);
+            let matchIndex = -1;
+            let matchExacto = false;
+            let codigoFallback = false;
+            matchIndex = opciones.findIndex(o => normalizar(o) === tipoNormalizado);
+            if (matchIndex >= 0) {
+                matchExacto = true;
+                console.log(`[Producto][Seleccion] matchExacto=true codigoFallback=false`);
+            } else {
+                const regexNormalizado = new RegExp(tipoNormalizado.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+                matchIndex = opciones.findIndex(o => regexNormalizado.test(normalizar(o)));
+                if (matchIndex >= 0) {
+                    console.log(`[Producto][Seleccion] matchExacto=false codigoFallback=false (regex match)`);
+                } else {
+                    matchIndex = opciones.findIndex(o => new RegExp(`^${codigoInicial}\\s*-`).test(o));
+                    if (matchIndex >= 0) {
+                        codigoFallback = true;
+                        console.log(`[Producto][Seleccion] matchExacto=false codigoFallback=true`);
+                    }
+                }
+            }
+            if (matchIndex >= 0) {
+                console.log(`[Producto][Seleccion] match encontrado='${opciones[matchIndex]}'`);
+                await items.nth(matchIndex).click({ force: true }).catch(() => {});
+                await page.waitForTimeout(300);
+                await page.keyboard.press('Escape').catch(() => {});
+                break;
+            }
+            await page.keyboard.press('Escape').catch(() => {});
+            await page.waitForTimeout(200);
+            estadoProducto = await validarProductoSeleccionado();
+            console.log(`[Producto][Seleccion] valorProductoDespuesReintento${intento}='${estadoProducto.valor}'`);
+            if (!estadoProducto.vacio) break;
+        }
+        if (estadoProducto.vacio) {
+            throw new Error(`[Producto][CRITICO] Producto quedó vacío después de seleccionar Categoría; no se pudo seleccionar tipoCuenta='${tipoCuenta}'`);
+        }
+    }
+}
+
+async function esperarProductoFinalVisibleDespuesDeConfirmacion(
+    page: Page,
+    tipoCuenta: string,
+    timeoutMs = 15000
+): Promise<boolean> {
+    const normalizar = (s: string) =>
+        s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+    const objetivo = normalizar(tipoCuenta);
+    const codigoProducto = (tipoCuenta.match(/^\s*(\d{3})\b/) || [])[1];
+    const nombreParcial = /(\d{3})\s*-\s*(.*?)(?:\s+DOP|\s+USD|\s+EUR|$)/i.exec(tipoCuenta)?.[2] || '';
+    const nombreParcialNormalizado = normalizar(nombreParcial);
+
+    const deadline = Date.now() + timeoutMs;
+    let senalesConsecutivas = 0;
+    const senalesRequeridas = 3;
+
+    while (Date.now() < deadline) {
+        const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+
+        const seccion = await localizarSeccionProductos(page).catch(() => null);
+        const seccionVisible = seccion ? await seccion.isVisible({ timeout: 500 }).catch(() => false) : false;
+
+        let textoProductos = '';
+        let tarjetasDetectadas = 0;
+        let tarjetaProductoDetectada = false;
+
+        if (seccion && seccionVisible) {
+            textoProductos = await seccion.innerText({ timeout: 1200 }).catch(() => '');
+
+            // Buscar cards de producto
+            const cards = seccion.locator('.p-card:visible, .p-card-body:visible, [class*="p-card-content"]:visible');
+            tarjetasDetectadas = await cards.count().catch(() => 0);
+
+            // Verificar si alguna card tiene indicadores de producto
+            for (let i = 0; i < Math.min(tarjetasDetectadas, 3); i++) {
+                const cardTexto = (await cards.nth(i).innerText().catch(() => '')).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+                const tieneNombreEnCard = /NOMBRE/i.test(cardTexto);
+                const tieneMonedaEnCard = /MONEDA|DOP|USD|EUR/i.test(cardTexto);
+                const tieneBalanceEnCard = /BALANCE|PROMEDIO|RD\$|US\$|EUR/i.test(cardTexto);
+                const tieneTasaEnCard = /TASA/i.test(cardTexto);
+                const tieneNombreParcialEnCard = nombreParcialNormalizado ? cardTexto.includes(nombreParcialNormalizado) : false;
+
+                if (tieneNombreEnCard && (tieneMonedaEnCard || tieneBalanceEnCard || tieneTasaEnCard || tieneNombreParcialEnCard)) {
+                    tarjetaProductoDetectada = true;
+                    console.log(`[Producto][PostAgregar][Poll] card ${i} detectada como producto: nombre=${tieneNombreEnCard} moneda=${tieneMonedaEnCard} balance=${tieneBalanceEnCard} tasa=${tieneTasaEnCard}`);
+                    break;
+                }
+            }
+        }
+
+        const norm = normalizar(textoProductos);
+        const tieneProducto = norm.includes(objetivo);
+        const tieneCodigo = codigoProducto ? norm.includes(codigoProducto) : false;
+        const tieneNombreParcial = nombreParcialNormalizado ? norm.includes(nombreParcialNormalizado) : false;
+        const tieneSenalesTarjeta = /MONEDA|BALANCE|TASA|PROP[OÓ]SITO|MONTO|DOP|USD|EUR|INSTRUMENTO|AHORROS|LIBRETA|CUENTA/i.test(textoProductos);
+
+        const tieneBotonesTarjeta = seccion && seccionVisible
+            ? await seccion.locator('button:has(i.pi-trash), button:has(i.pi-pencil), button:has-text("Eliminar"), button:has-text("Editar")').first().isVisible().catch(() => false)
+            : false;
+
+        // Distinguir mensaje vacío bloqueante de subsección
+        // "No se han encontrado resultados" después de "Relacionados" NO es bloqueante
+        const tieneRelacionados = /RELACIONADOS|AÑADIR RELACIONADO/i.test(textoProductos);
+        const posicionRelacionados = textoProductos.toLowerCase().indexOf('relacionados');
+        const posicionNoResultados = textoProductos.toLowerCase().indexOf('no se han encontrado resultados');
+        const mensajeVacioEsDeRelacionados = posicionRelacionados > 0 && posicionNoResultados > posicionRelacionados;
+
+        const tieneMensajeVacioReal = /No se agregaron productos|No hay productos agregados|No existen productos|No se ha seleccionado producto/i.test(textoProductos);
+        const tieneMensajeVacio = tieneMensajeVacioReal || (mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada);
+
+        const tieneAlertaError = seccion && seccionVisible
+            ? await seccion.locator('.p-message-error, .p-toast-message-error, [role="alert"]').first().isVisible().catch(() => false)
+            : false;
+
+        console.log(`[Producto][PostAgregar][Poll] modalVisible=${modalVisible} seccionVisible=${seccionVisible} tieneProducto=${tieneProducto} tieneCodigo=${tieneCodigo} tieneNombreParcial=${tieneNombreParcial} tieneSenalesTarjeta=${tieneSenalesTarjeta} tieneBotonesTarjeta=${tieneBotonesTarjeta} tieneMensajeVacio=${tieneMensajeVacio} tieneMensajeVacioReal=${tieneMensajeVacioReal} mensajeVacioEsDeRelacionados=${mensajeVacioEsDeRelacionados} tarjetaProductoDetectada=${tarjetaProductoDetectada} tieneAlertaError=${tieneAlertaError}`);
+
+        if (!modalVisible && !tieneAlertaError) {
+            // Si hay card de producto detectada, aceptar inmediatamente
+            if (tarjetaProductoDetectada) {
+                console.log(`[Producto][PostAgregar] tarjeta final aceptada por card de producto post-confirmación`);
+                return true;
+            }
+
+            if (tieneProducto && tieneSenalesTarjeta) {
+                return true;
+            }
+
+            // Aceptar si tiene señales de tarjeta sin mensaje vacío bloqueante
+            if (!tieneMensajeVacio && tieneSenalesTarjeta && (tieneCodigo || tieneNombreParcial || tieneBotonesTarjeta)) {
+                senalesConsecutivas++;
+                if (senalesConsecutivas >= senalesRequeridas) {
+                    console.log(`[Producto][PostAgregar] tarjeta final aceptada por señales consistentes post-confirmación (senales=${senalesConsecutivas})`);
+                    return true;
+                }
+            } else if (!tieneSenalesTarjeta || tieneMensajeVacio) {
+                senalesConsecutivas = 0;
+            }
+        } else {
+            senalesConsecutivas = 0;
+        }
+
+await page.waitForTimeout(700);
+    }
+
+    console.log(`[Producto][PostAgregar][Poll] timeout alcanzado sin señales consistentes`);
+    return false;
+}
+
+async function diagnosticarPantallaProductoPostAgregar(page: Page, tipoCuenta: string) {
+    console.log(`[Producto][Diagnostico] dumping state post-confirmacion para tipoCuenta='${tipoCuenta}'`);
+    const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+    const seccion = await localizarSeccionProductos(page).catch(() => null);
+    const seccionVisible = seccion ? await seccion.isVisible({ timeout: 1000 }).catch(() => false) : false;
+    const tieneDropdownCategoria = seccion ? await seccion.locator('.p-dropdown:visible').first().isVisible().catch(() => false) : false;
+    const tieneDropdownProducto = seccion ? await seccion.locator('.p-dropdown:visible').nth(1).isVisible().catch(() => false) : false;
+
+    const codigoProducto = (tipoCuenta.match(/^\s*(\d{3})\b/) || [])[1];
+    const nombreParcial = /(\d{3})\s*-\s*(.*?)(?:\s+DOP|\s+USD|\s+EUR|$)/i.exec(tipoCuenta)?.[2] || '';
+
+    let textoScope = '';
+    let tarjetasDetectadas = 0;
+    let codigoVisible = false;
+    let nombreParcialVisible = false;
+    let tieneBotonesEditarEliminar = false;
+    let mensajeVacioBloqueante = false;
+    let tarjetaProductoDetectada = false;
+
+    if (seccion && seccionVisible) {
+        textoScope = (await seccion.innerText({ timeout: 1200 }).catch(() => '')).slice(0, 500);
+        const norm = textoScope.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+        codigoVisible = codigoProducto ? norm.includes(codigoProducto) : false;
+        nombreParcialVisible = nombreParcial ? norm.includes(nombreParcial.toUpperCase()) : false;
+        tarjetasDetectadas = await seccion.locator('[class*="card"], [class*="tarjeta"], .p-card, .p-datatable-row').count().catch(() => 0);
+        tieneBotonesEditarEliminar = await seccion.locator('button:has(i.pi-trash), button:has(i.pi-pencil), button:has-text("Eliminar"), button:has-text("Editar")').first().isVisible().catch(() => false);
+
+        // Verificar si hay mensaje vacío bloqueante
+        const tieneRelacionados = /RELACIONADOS|AÑADIR RELACIONADO/i.test(textoScope);
+        const posicionRelacionados = textoScope.toLowerCase().indexOf('relacionados');
+        const posicionNoResultados = textoScope.toLowerCase().indexOf('no se han encontrado resultados');
+        const mensajeVacioEsDeRelacionados = posicionRelacionados > 0 && posicionNoResultados > posicionRelacionados;
+
+        // Buscar cards
+        const cards = seccion.locator('.p-card:visible, .p-card-body:visible, [class*="p-card-content"]:visible');
+        const cardsCount = await cards.count().catch(() => 0);
+
+        for (let i = 0; i < Math.min(cardsCount, 3); i++) {
+            const cardTexto = (await cards.nth(i).innerText().catch(() => '')).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+            const tieneNombreEnCard = /NOMBRE/i.test(cardTexto);
+            const tieneMonedaEnCard = /MONEDA|DOP|USD|EUR/i.test(cardTexto);
+            const tieneBalanceEnCard = /BALANCE|PROMEDIO/i.test(cardTexto);
+
+            if (tieneNombreEnCard && (tieneMonedaEnCard || tieneBalanceEnCard)) {
+                tarjetaProductoDetectada = true;
+                break;
+            }
+        }
+
+        mensajeVacioBloqueante = mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada;
+    }
+
+console.log(`[Producto][Diagnostico] modalVisible=${modalVisible} seccionVisible=${seccionVisible} dropdownCat=${tieneDropdownCategoria} dropdownProd=${tieneDropdownProducto}`);
+    console.log(`[Producto][Diagnostico] codigoVisible=${codigoVisible} nombreParcialVisible=${nombreParcialVisible} tarjetasDetectadas=${tarjetasDetectadas} tieneBotonesEditarEliminar=${tieneBotonesEditarEliminar} mensajeVacioBloqueante=${mensajeVacioBloqueante} tarjetaProductoDetectada=${tarjetaProductoDetectada}`);
+    console.log(`[Producto][Diagnostico] textoScope='${textoScope.replace(/\s+/g, ' ').trim().slice(0, 300)}...'`);
 }
 
 async function etapaSeccionProductosPostSeleccion(
@@ -6092,6 +6859,66 @@ async function etapaSeccionProductosPostSeleccion(
     if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
         return;
     }
+
+    const keyProducto = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+    if (productoProcesadoPorRegistro.has(keyProducto)) {
+        console.log(`[Producto][GuardUnico] producto ya procesado; saliendo de etapa producto sin esperar modal key=${keyProducto}`);
+
+        // Usar el mismo criterio robusto de detección de cards que el polling
+        const normalizar = (s: string) =>
+            String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+
+        const nombreParcial = /(\d{3})\s*-\s*(.*?)(?:\s+DOP|\s+USD|\s+EUR|$)/i.exec(registro.tipoCuenta)?.[2] || '';
+        const nombreParcialNormalizado = normalizar(nombreParcial);
+
+        const seccion = await localizarSeccionProductos(page).catch(() => null);
+        const seccionVisible = seccion ? await seccion.isVisible({ timeout: 1000 }).catch(() => false) : false;
+
+        let tarjetaProductoDetectada = false;
+        let mensajeVacioBloqueante = false;
+
+        if (seccion && seccionVisible) {
+            const textoScope = (await seccion.innerText({ timeout: 1200 }).catch(() => ''));
+            const norm = normalizar(textoScope);
+
+            // Verificar mensaje vacío de Relacionados
+            const tieneRelacionados = /RELACIONADOS|AÑADIR RELACIONADO/i.test(textoScope);
+            const posicionRelacionados = textoScope.toLowerCase().indexOf('relacionados');
+            const posicionNoResultados = textoScope.toLowerCase().indexOf('no se han encontrado resultados');
+            const mensajeVacioEsDeRelacionados = posicionRelacionados > 0 && posicionNoResultados > posicionRelacionados;
+
+            // Buscar cards
+            const cards = seccion.locator('.p-card:visible, .p-card-body:visible, [class*="p-card-content"]:visible');
+            const cardsCount = await cards.count().catch(() => 0);
+
+            for (let i = 0; i < Math.min(cardsCount, 3); i++) {
+                const cardTexto = (await cards.nth(i).innerText().catch(() => '')).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+                const tieneNombreEnCard = /NOMBRE/i.test(cardTexto);
+                const tieneMonedaEnCard = /MONEDA|DOP|USD|EUR/i.test(cardTexto);
+                const tieneBalanceEnCard = /BALANCE|PROMEDIO/i.test(cardTexto);
+                const tieneTasaEnCard = /TASA/i.test(cardTexto);
+                const tieneNombreParcialEnCard = nombreParcialNormalizado ? cardTexto.includes(nombreParcialNormalizado) : false;
+
+                if (tieneNombreEnCard && (tieneMonedaEnCard || tieneBalanceEnCard || tieneTasaEnCard || tieneNombreParcialEnCard)) {
+                    tarjetaProductoDetectada = true;
+                    break;
+                }
+            }
+
+            mensajeVacioBloqueante = mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada;
+        }
+
+        console.log(`[Producto][GuardUnico] reentrada tarjetaProductoDetectada=${tarjetaProductoDetectada} mensajeVacioBloqueante=${mensajeVacioBloqueante}`);
+
+        if (tarjetaProductoDetectada && !mensajeVacioBloqueante) {
+            console.log('[Producto] producto ya agregado visible; listo para avanzar a Siguiente');
+            return;
+        }
+
+        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
+        throw new Error(`[Producto][CRITICO] Producto marcado como procesado pero tarjeta no visible al reentrar etapa producto. key=${keyProducto}`);
+    }
+
     let seccionProductos = seccionProductosInicial;
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const confirmarProductoAgregado = async () => {
@@ -6462,7 +7289,19 @@ async function etapaSeccionProductosPostSeleccion(
         await page.waitForTimeout(FAST_UI ? 600 : 1800);
         const aceptoConfirmacion = await cerrarModalProductoConAceptar().catch(() => false);
         console.log(`[Producto] Confirmacion de producto aceptada=${aceptoConfirmacion}`);
-        await page.waitForTimeout(FAST_UI ? 500 : 1200);
+
+        console.log('[Producto][PostAgregar] confirmación aceptada; esperando cierre de modal y tarjeta final');
+        await page.waitForTimeout(FAST_UI ? 800 : 1500);
+
+        const modalProducto = page.locator('.p-dialog:visible, [role="dialog"]:visible').filter({
+            hasText: /Cuentas de efectivo|Balance promedio|Calcular tasa|Aceptar|Configuraci/i
+        }).first();
+        await modalProducto.waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {
+            console.log('[Producto][PostAgregar][WARN] modal producto no confirmó hidden dentro del timeout');
+        });
+
+        await page.waitForTimeout(FAST_UI ? 400 : 800);
+
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
 
         const aparecioTrasAgregar = await esperarProductoVisibleTrasAgregar();
@@ -6472,7 +7311,29 @@ async function etapaSeccionProductosPostSeleccion(
             console.log('[Producto] Producto agregado como tarjeta final visible=true');
             productoAgregado = true;
             marcarProductoConfirmado(registro);
+            const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+            productoProcesadoPorRegistro.add(keyAhora);
+            console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
             break;
+        }
+
+        if (aceptoConfirmacion) {
+            console.log('[Producto][PostAgregar] Confirmación aceptada; esperando tarjeta final con polling...');
+            const aparecioConPolling = await esperarProductoFinalVisibleDespuesDeConfirmacion(page, registro.tipoCuenta, 15000);
+            console.log(`[Producto][PostAgregar] aparecioConPolling=${aparecioConPolling}`);
+            if (aparecioConPolling) {
+                console.log('[Producto] Producto apareció después de confirmación aceptada');
+                productoAgregado = true;
+                marcarProductoConfirmado(registro);
+                const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+                productoProcesadoPorRegistro.add(keyAhora);
+                console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                break;
+            } else {
+                console.log('[Producto][PostAgregar][WARN] Confirmación aceptada pero tarjeta final no apareció después de 15s');
+                await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
+                throw new Error(`[CRITICO] Confirmación aceptada pero producto '${registro.tipoCuenta}' no visible en UI después de esperar 15s.`);
+            }
         }
 
         const confirmoAhora = await confirmarProductoAgregado();
@@ -6480,6 +7341,9 @@ async function etapaSeccionProductosPostSeleccion(
         if (confirmoAhora) {
             productoAgregado = true;
             marcarProductoConfirmado(registro);
+            const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+            productoProcesadoPorRegistro.add(keyAhora);
+            console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
             break;
         }
 
@@ -6559,7 +7423,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                     : false;
                 if (continuarVisible && continuarEnabled) {
                     try {
-                        await continuarResolviendoGestionDocumentalSiPide(currentPage, { maxIntentos: 2 });
+                        await continuarResolviendoGestionDocumentalSiPide(currentPage, { maxIntentos: 2 }, registro);
                     } catch (e) {
                         const msg = e instanceof Error ? e.message : String(e);
                         if (/\[CRITICO\].*Gestion documental/i.test(msg)) throw e;
@@ -6594,7 +7458,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                 if (btnGDVisible) {
                     console.log(`[NAV-PRODUCTO] Boton GD visible -> todavia en formulario pre-productos. Intentando continuarResolviendo...`);
                     try {
-                        await continuarResolviendoGestionDocumentalSiPide(currentPage, { maxIntentos: 2 });
+                        await continuarResolviendoGestionDocumentalSiPide(currentPage, { maxIntentos: 2 }, registro);
                     } catch (e) {
                         const msg = e instanceof Error ? e.message : String(e);
                         console.log(`[NAV-PRODUCTO][WARN] continuarResolviendo fallo: ${msg}`);
@@ -6668,7 +7532,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                 : false;
             if (continuarVisible && continuarEnabled) {
                 try {
-                    await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 });
+await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro);
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     if (/\[CRITICO\].*Gestion documental/i.test(msg)) throw e;
@@ -6726,7 +7590,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
             // Todavia en formulario — intentar avanzar con GD upload como ultima oportunidad
             console.log(`[NAV-PRODUCTO] Boton GD visible → todavia en formulario pre-productos. Intentando continuarResolviendo...`);
             try {
-                await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 });
+                await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro);
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
                 console.log(`[NAV-PRODUCTO][WARN] continuarResolviendo fallo: ${msg}`);
@@ -7131,7 +7995,7 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         if (postProductoLlenadoDesdeCumplimiento) return;
         console.log('[Relacionados] Pantalla post-producto recibida desde cumplimiento, no se hará Continuar adicional');
         console.log('[PostProducto] Iniciando llenado inmediatamente después de OFAC');
-        const completo = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true });
+        const completo = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true }, registro);
         if (!completo) {
             throw new Error('[CRITICO] No se pudo completar la pantalla post-producto después de OFAC.');
         }
@@ -7143,6 +8007,7 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         const resultado = await intentarAvanceRealHaciaTaller(page, contexto, {
             maxClicks: 2,
             tipoCuenta: registro.tipoCuenta,
+            registro,
         });
         if (resultado === 'gestion-documental') {
             await resolverGestionDocumentalPostContinuarPrimeraPantalla(page, { maxIntentos: 3 }).catch((e) => {
@@ -7210,7 +8075,7 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         const resultadoInicial = await intentarAvanceRealHaciaTaller(
             page,
             `etapa relacionados ${intentoAvance}/3`,
-            { maxClicks: 2, tipoCuenta: registro.tipoCuenta }
+            { maxClicks: 2, tipoCuenta: registro.tipoCuenta, registro }
         );
 
         if (resultadoInicial === 'gestion-documental') {
@@ -7263,14 +8128,14 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
             await llenarPostProductoPostOfac();
             continue;
         }
-        const completoPostProducto = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
+        const completoPostProducto = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false }, registro);
         if (completoPostProducto) {
             await page.waitForTimeout(FAST_UI ? 300 : 800);
             // Si el portal nos regreso a la pantalla de datos del cliente, navegar de vuelta a productos
             const enProductosAhora = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
             if (!enProductosAhora) {
                 console.log('[Relacionados] Campos completados. Navegando de vuelta a la pantalla de productos...');
-                await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }).catch(() => { });
+                await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro).catch(() => { });
             }
             continue;
         }
@@ -7495,6 +8360,11 @@ test('Cuenta Efectivo Cliente Nuevo - desde Excel', async () => {
             },
             onRegistroError: async (_registro, errorMsg) => {
                 const esCritico = /\[CRITICO\]/i.test(errorMsg);
+                const esOmitido = /\[OMITIDO\]/i.test(errorMsg);
+                if (esOmitido) {
+                    console.log(`[RegistroRunner] Registro omitido: ${errorMsg}`);
+                    return 'continue';
+                }
                 if (session.continueOnRegistroError && !esCritico) {
                     return 'continue';
                 }
@@ -7534,3 +8404,159 @@ test('Cuenta Efectivo Cliente Nuevo - desde Excel', async () => {
         await closeBrowserSession(session, failedRegistros);
     }
 });
+
+async function completarOtrasCoincidenciasMixtasSiAplica(portalPage: Page): Promise<boolean> {
+    console.log('[MixtoOFACPLAFT] puente mixto verificando si aplica Otras Coincidencias');
+
+    await portalPage.waitForTimeout(1500);
+
+    const paginas = portalPage.context().pages();
+    let bizagiPage: Page | null = null;
+
+    for (let intento = 1; intento <= 3; intento++) {
+        for (const p of paginas) {
+            const url = p.url();
+            if (!url.includes('bizagi.com')) continue;
+            const tieneGestionar = await p.getByText(/Gestionar\s+Coincidencias/i).first().isVisible().catch(() => false);
+            const tieneOFAC = await p.getByText(/OFAC|Listas\s+OFAC/i).first().isVisible().catch(() => false);
+            if (tieneGestionar || tieneOFAC) {
+                bizagiPage = p;
+                break;
+            }
+        }
+        if (bizagiPage) break;
+        console.log(`[MixtoOFACPLAFT] intento ${intento}/3 esperando pagina Bizagi...`);
+        await portalPage.waitForTimeout(1200);
+    }
+
+    if (!bizagiPage) {
+        console.log('[MixtoOFACPLAFT] no hay pagina Bizagi activa con Gestionar Coincidencias');
+        return false;
+    }
+
+    await bizagiPage.bringToFront().catch(() => {});
+    await bizagiPage.waitForTimeout(800);
+
+    const headerOtras = bizagiPage.getByText(/Otras\s+Coincidencias/i).first();
+    const headerVisible = await headerOtras.isVisible({ timeout: 3000 }).catch(() => false);
+    console.log(`[MixtoOFACPLAFT] header Otras Coincidencias visible=${headerVisible}`);
+
+    if (!headerVisible) {
+        const tieneLexis = await bizagiPage.locator('div, tr, td, span').filter({ hasText: /Lexis\s+Nexis/i }).first().isVisible().catch(() => false);
+        if (!tieneLexis) {
+            console.log('[MixtoOFACPLAFT] no aplica caso mixto; no hay Otras Coincidencias/Lexis Nexis');
+            return false;
+        }
+    }
+
+    const filasLexisSelectors = [
+        'div.ui-bizagi-grid-row:has-text("Lexis Nexis")',
+        'tr:has-text("Lexis Nexis")',
+        '[role="row"]:has-text("Lexis Nexis")',
+        'div:has-text("Lexis Nexis")',
+    ];
+
+    let filasLexis = bizagiPage.locator(filasLexisSelectors[0]);
+    let totalFilas = 0;
+    for (const selector of filasLexisSelectors) {
+        const candidate = bizagiPage.locator(selector);
+        const count = await candidate.count().catch(() => 0);
+        if (count > 0) {
+            filasLexis = candidate;
+            totalFilas = count;
+            break;
+        }
+    }
+
+    console.log(`[MixtoOFACPLAFT] filas Lexis Nexis detectadas=${totalFilas}`);
+
+    if (totalFilas === 0) {
+        console.log('[MixtoOFACPLAFT] no hay filas Lexis Nexis visibles');
+        return false;
+    }
+
+    let pendientes = 0;
+    for (let i = 0; i < Math.min(totalFilas, 5); i++) {
+        const fila = filasLexis.nth(i);
+        const visible = await fila.isVisible().catch(() => false);
+        if (!visible) continue;
+
+        const textoFila = await fila.innerText().catch(() => '');
+        if (!/Lexis\s*Nexis/i.test(textoFila)) continue;
+
+        const comboSelectors = [
+            'input.ui-select-data.ui-selectmenu-value[role="combobox"]',
+            'input[role="combobox"]',
+            'input.ui-selectmenu-value',
+            'input[aria-controls^="listbox-"]',
+        ];
+
+        let combo: Locator | null = null;
+        for (const sel of comboSelectors) {
+            const c = fila.locator(sel).first();
+            const v = await c.isVisible().catch(() => false);
+            if (v) {
+                combo = c;
+                break;
+            }
+        }
+
+        if (!combo) {
+            console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo no encontrado`);
+            continue;
+        }
+
+        const valorActual = await combo.inputValue().catch(() => '');
+        console.log(`[MixtoOFACPLAFT] fila ${i + 1} accionActual='${valorActual}'`);
+
+        if (/Falso\s+Positivo/i.test(valorActual)) {
+            console.log(`[MixtoOFACPLAFT] fila ${i + 1} ya tiene Falso Positivo; omitiendo`);
+            continue;
+        }
+
+        if (/Por favor seleccione/i.test(valorActual) || !valorActual.trim()) {
+            pendientes++;
+            console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo encontrado por input.ui-select-data.ui-selectmenu-value`);
+
+            await combo.scrollIntoViewIfNeeded().catch(() => {});
+            await combo.click({ force: true }).catch(() => {});
+
+            const ariaControls = await combo.getAttribute('aria-controls').catch(() => null);
+            let listboxVisible = false;
+
+            if (ariaControls) {
+                const listbox = bizagiPage.locator(`#${ariaControls}, [id="${ariaControls}"]`).first();
+                listboxVisible = await listbox.isVisible({ timeout: 1500 }).catch(() => false);
+            }
+
+            if (!listboxVisible) {
+                const fallbackListbox = bizagiPage.locator('[role="listbox"]:visible, .ui-selectmenu-menu:visible, .ui-menu:visible').first();
+                listboxVisible = await fallbackListbox.isVisible({ timeout: 1500 }).catch(() => false);
+            }
+
+            console.log(`[MixtoOFACPLAFT] fila ${i + 1} panel abierto=${listboxVisible}`);
+
+            const opcion = bizagiPage.locator('[role="option"], li, .ui-menu-item, .ui-selectmenu-item').filter({ hasText: /Falso\s+Positivo/i }).first();
+            const opcionVisible = await opcion.isVisible({ timeout: 2000 }).catch(() => false);
+
+            if (opcionVisible) {
+                await opcion.click({ force: true }).catch(() => {});
+                await bizagiPage.waitForTimeout(400);
+
+                const nuevoValor = await combo.inputValue().catch(() => '');
+                console.log(`[MixtoOFACPLAFT] fila ${i + 1} accion seleccionada='${nuevoValor}'`);
+            } else {
+                console.log(`[MixtoOFACPLAFT] fila ${i + 1} opcion Falso Positivo no encontrada`);
+            }
+        }
+    }
+
+    console.log(`[MixtoOFACPLAFT] pendientesSinAccion=${pendientes}`);
+
+    if (pendientes > 0) {
+        throw new Error(`[MixtoOFACPLAFT][CRITICO] Quedan filas Lexis Nexis sin Acción. pendientes=${pendientes}`);
+    }
+
+    console.log('[MixtoOFACPLAFT] todas las Otras Coincidencias fueron completadas');
+    return true;
+}

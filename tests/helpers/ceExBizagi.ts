@@ -2663,7 +2663,305 @@ async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<voi
   await comboMotivo.click({ force: true }).catch(() => {});
 }
 
-async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
+async function completarOtrasCoincidenciasEnGestionMixtaSiExisten(page: Page): Promise<boolean> {
+  console.log('[MixtoOFACPLAFT] puente mixto verificando si aplica Otras Coincidencias');
+
+  await page.waitForTimeout(800);
+
+  const headerOtras = page.getByText(/Otras\s+Coincidencias/i).first();
+  const headerVisible = await headerOtras.isVisible({ timeout: 4000 }).catch(() => false);
+  console.log(`[MixtoOFACPLAFT] header Otras Coincidencias visible=${headerVisible}`);
+
+  if (!headerVisible) {
+    const tieneLexis = await page.locator('div, tr, td, span').filter({ hasText: /Lexis\s+Nexis/i }).first().isVisible().catch(() => false);
+    if (!tieneLexis) {
+      console.log('[MixtoOFACPLAFT] no hay Otras Coincidencias; no aplica');
+      return false;
+    }
+  }
+
+  const filasLexisSelectors = [
+    'div.ui-bizagi-grid-row:has-text("Lexis Nexis")',
+    'tr:has-text("Lexis Nexis")',
+    '[role="row"]:has-text("Lexis Nexis")',
+    'div:has-text("Lexis Nexis")',
+    '.ui-bizagi-grid-row:has-text("Lexis Nexis")',
+  ];
+
+  let filasLexis = page.locator(filasLexisSelectors[0]);
+  let totalFilas = 0;
+  for (const selector of filasLexisSelectors) {
+    const candidate = page.locator(selector);
+    const count = await candidate.count().catch(() => 0);
+    if (count > 0) {
+      filasLexis = candidate;
+      totalFilas = count;
+      break;
+    }
+  }
+
+  console.log(`[MixtoOFACPLAFT] filas Lexis Nexis detectadas=${totalFilas}`);
+
+  if (totalFilas === 0) {
+    console.log('[MixtoOFACPLAFT] no hay filas Lexis Nexis visibles');
+    return false;
+  }
+
+  const leerValorCombo = async (fila: Locator, combo: Locator) => {
+    const inputValue = await combo.inputValue().catch(() => '');
+    const attrValue = await combo.getAttribute('value').catch(() => '');
+    const contenedor = fila.locator('xpath=.//*[contains(@class,"ui-selectmenu") or contains(@class,"ui-select")][1]').first();
+    const textoContenedor = ((await contenedor.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+    return [inputValue, attrValue, textoContenedor].find((v) => !!String(v ?? '').trim()) || '';
+  };
+
+  const detectarPanelAccion = async (filaNumero: number, combo: Locator) => {
+    const comboId = await combo.getAttribute('id').catch(() => null);
+    const ariaControls = await combo.getAttribute('aria-controls').catch(() => null);
+    console.log(`[MixtoOFACPLAFT] fila ${filaNumero} ariaControls='${ariaControls || ''}'`);
+
+    if (ariaControls) {
+      const candidatosAria = [
+        page.locator(`#${ariaControls}`).first(),
+        page.locator(`[id="${ariaControls}"]`).first(),
+        comboId ? page.locator(`[aria-labelledby="${comboId}"]`).first() : null,
+      ].filter(Boolean) as Locator[];
+
+      for (const candidato of candidatosAria) {
+        const visible = await candidato.isVisible({ timeout: 800 }).catch(() => false);
+        if (visible) {
+          console.log(`[MixtoOFACPLAFT] fila ${filaNumero} panel por ariaControls visible=true`);
+          return candidato;
+        }
+      }
+    }
+    console.log(`[MixtoOFACPLAFT] fila ${filaNumero} panel por ariaControls visible=false`);
+
+    const fallbackCandidates = [
+      page.locator('[role="listbox"]:visible').last(),
+      page.locator('[role="dialog"]:visible').filter({ hasText: /Falso\s+Positivo/i }).last(),
+      page.locator('.ui-selectmenu-menu:visible').last(),
+      page.locator('.ui-selectmenu-open:visible').last(),
+      page.locator('.ui-menu:visible').last(),
+      page.locator('.ui-selectmenu-list:visible').last(),
+      page.locator('.ui-select-options:visible').last(),
+      page.locator('.ui-selectmenu:visible').last(),
+      page.locator('.ui-select-dropdown:visible').last(),
+      page.locator('ul:visible').filter({ hasText: /Falso\s+Positivo/i }).last(),
+      page.locator('div:visible').filter({ hasText: /Falso\s+Positivo/i }).last(),
+    ];
+
+    for (const candidato of fallbackCandidates) {
+      const visible = await candidato.isVisible({ timeout: 500 }).catch(() => false);
+      if (visible) {
+        console.log(`[MixtoOFACPLAFT] fila ${filaNumero} panel por fallback visible=true`);
+        return candidato;
+      }
+    }
+
+    console.log(`[MixtoOFACPLAFT] fila ${filaNumero} panel por fallback visible=false`);
+    return null;
+  };
+
+  const listarOpcionesVisibles = async (panel: Locator) => {
+    const opcionesLocator = panel.locator('[role="option"], li, .ui-menu-item, .ui-selectmenu-item, .ui-select-option, div, span');
+    const totalOpciones = await opcionesLocator.count().catch(() => 0);
+    const opciones: string[] = [];
+    for (let idx = 0; idx < Math.min(totalOpciones, 15); idx++) {
+      const texto = ((await opcionesLocator.nth(idx).innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+      if (!texto || opciones.includes(texto)) continue;
+      opciones.push(texto);
+    }
+    return opciones;
+  };
+
+  let pendientes = 0;
+  for (let i = 0; i < Math.min(totalFilas, 5); i++) {
+    const fila = filasLexis.nth(i);
+    const visible = await fila.isVisible().catch(() => false);
+    if (!visible) continue;
+
+    const textoFila = await fila.innerText().catch(() => '');
+    if (!/Lexis\s*Nexis/i.test(textoFila)) continue;
+
+    const comboSelectors = [
+      'input.ui-select-data.ui-selectmenu-value[role="combobox"]',
+      'input[role="combobox"]',
+      'input.ui-selectmenu-value',
+      'input[aria-controls^="listbox-"]',
+    ];
+
+    let combo: Locator | null = null;
+    for (const sel of comboSelectors) {
+      const c = fila.locator(sel).first();
+      const v = await c.isVisible().catch(() => false);
+      if (v) {
+        combo = c;
+        break;
+      }
+    }
+
+    if (!combo) {
+      console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo no encontrado`);
+      continue;
+    }
+
+    const valorActual = await combo.inputValue().catch(() => '');
+    console.log(`[MixtoOFACPLAFT] fila ${i + 1} accionActual='${valorActual}'`);
+
+    if (/Falso\s+Positivo/i.test(valorActual)) {
+      console.log(`[MixtoOFACPLAFT] fila ${i + 1} ya tiene Falso Positivo; omitiendo`);
+      continue;
+    }
+
+    if (/Por favor seleccione/i.test(valorActual) || !valorActual.trim()) {
+      console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo encontrado por input.ui-select-data.ui-selectmenu-value`);
+
+      await combo.scrollIntoViewIfNeeded().catch(() => {});
+      await fila.scrollIntoViewIfNeeded().catch(() => {});
+      await page.waitForTimeout(250);
+      await page.waitForFunction(
+        () => !document.querySelector('.ui-widget-overlay:not([style*="display: none"]), .p-dialog-mask:not([style*="display: none"]), .p-component-overlay-enter'),
+        { timeout: 2000 }
+      ).catch(() => {});
+
+      const wrapper = fila.locator('xpath=.//*[contains(@class,"ui-selectmenu") or contains(@class,"ui-select")][1]').first();
+      const triggerCandidates = [
+        wrapper.locator('.ui-selectmenu-button, .ui-selectmenu-btn, .ui-selectmenu-icon, .ui-selectmenu-trigger').first(),
+        wrapper.locator('[class*="selectmenu"] [class*="icon"], [class*="select"] [class*="arrow"]').first(),
+      ];
+
+      const estrategiasAbrir: Array<{ nombre: string; run: () => Promise<void> }> = [
+        { nombre: 'input-click', run: async () => { await combo.click({ force: true }).catch(() => {}); } },
+        {
+          nombre: 'right-edge-click',
+          run: async () => {
+            const box = await combo.boundingBox().catch(() => null);
+            if (!box) return;
+            await page.mouse.click(box.x + box.width - 15, box.y + box.height / 2).catch(() => {});
+          },
+        },
+        { nombre: 'wrapper-click', run: async () => { await wrapper.click({ force: true }).catch(() => {}); } },
+        {
+          nombre: 'trigger-click',
+          run: async () => {
+            for (const trigger of triggerCandidates) {
+              const visibleTrigger = await trigger.isVisible().catch(() => false);
+              if (!visibleTrigger) continue;
+              await trigger.click({ force: true }).catch(() => {});
+              return;
+            }
+          },
+        },
+        {
+          nombre: 'keyboard',
+          run: async () => {
+            await combo.focus().catch(() => {});
+            await page.keyboard.press('ArrowDown').catch(() => {});
+            await page.waitForTimeout(150);
+            await page.keyboard.press('Space').catch(() => {});
+            await page.waitForTimeout(150);
+            await page.keyboard.press('Enter').catch(() => {});
+          },
+        },
+      ];
+
+      let panel: Locator | null = null;
+      for (const estrategia of estrategiasAbrir) {
+        await estrategia.run();
+        await page.waitForTimeout(400);
+        panel = await detectarPanelAccion(i + 1, combo);
+        const abierto = !!panel;
+        console.log(`[MixtoOFACPLAFT] fila ${i + 1} abrir combo intento=${estrategia.nombre} abierto=${abierto}`);
+        if (abierto) break;
+      }
+
+      let seleccionado = false;
+      if (panel) {
+        const opciones = await listarOpcionesVisibles(panel);
+        console.log(`[MixtoOFACPLAFT] fila ${i + 1} opciones=[${opciones.map((x) => `'${x}'`).join(', ')}]`);
+
+        const opcion = panel
+          .locator('[role="option"], li, .ui-menu-item, .ui-selectmenu-item, .ui-select-option, div, span')
+          .filter({ hasText: /Falso\s+Positivo/i })
+          .first();
+        const opcionVisible = await opcion.isVisible({ timeout: 1500 }).catch(() => false);
+
+        if (opcionVisible) {
+          let clicked = await opcion.click().then(() => true).catch(() => false);
+          if (!clicked) clicked = await opcion.click({ force: true }).then(() => true).catch(() => false);
+          if (!clicked) {
+            const handle = await opcion.elementHandle().catch(() => null);
+            if (handle) {
+              clicked = await page.evaluate((el) => {
+                (el as HTMLElement).click();
+                return true;
+              }, handle).catch(() => false);
+            }
+          }
+          if (!clicked) {
+            const fallbackTexto = page.getByText(/Falso\s+Positivo/i).last();
+            const fallbackTextoVisible = await fallbackTexto.isVisible({ timeout: 500 }).catch(() => false);
+            if (fallbackTextoVisible) {
+              await fallbackTexto.click({ force: true }).catch(() => {});
+            }
+          }
+
+          await page.waitForTimeout(500);
+          const accionDespues = await leerValorCombo(fila, combo);
+          console.log(`[MixtoOFACPLAFT] fila ${i + 1} accionDespues='${accionDespues}'`);
+          seleccionado = /Falso\s+Positivo/i.test(accionDespues);
+          if (seleccionado) {
+            console.log(`[MixtoOFACPLAFT] fila ${i + 1} accion seleccionada='${accionDespues}'`);
+          }
+        }
+      }
+
+      if (!seleccionado) {
+        const beforeFill = await combo.inputValue().catch(() => '');
+        let fallbackAplicado = false;
+        if (/por favor seleccione/i.test(beforeFill) || !beforeFill.trim()) {
+          await combo.focus().catch(() => {});
+          fallbackAplicado = await combo.evaluate((el) => {
+            const input = el as HTMLInputElement;
+            try {
+              input.value = 'Falso Positivo';
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              input.dispatchEvent(new Event('blur', { bubbles: true }));
+              return true;
+            } catch {
+              return false;
+            }
+          }).catch(() => false);
+          await page.keyboard.press('Enter').catch(() => {});
+          await page.keyboard.press('Tab').catch(() => {});
+          await page.waitForTimeout(400);
+        }
+
+        const valorFallback = await leerValorCombo(fila, combo);
+        console.log(`[MixtoOFACPLAFT] fila ${i + 1} fallback fill/eventos aplicado=${fallbackAplicado} valor='${valorFallback}'`);
+        seleccionado = /Falso\s+Positivo/i.test(valorFallback);
+        if (seleccionado) {
+          console.log(`[MixtoOFACPLAFT] fila ${i + 1} accion seleccionada='${valorFallback}'`);
+        }
+      }
+
+      if (!seleccionado) pendientes++;
+    }
+  }
+
+  console.log(`[MixtoOFACPLAFT] pendientesSinAccion=${pendientes}`);
+
+  if (pendientes > 0) {
+    throw new Error(`[MixtoOFACPLAFT][CRITICO] No se pudo seleccionar Falso Positivo en filas Lexis Nexis. pendientes=${pendientes}`);
+  }
+
+  console.log('[MixtoOFACPLAFT] todas las Otras Coincidencias fueron completadas');
+  return true;
+}
+
+async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page, mpn?: string) {
   const bodyText = ((await bizagiPage.locator('body').innerText({ timeout: 2000 }).catch(() => '')) || '');
   const tienePlaft = /PLAFT|Lexis\s*Nexis|Falso\s+Positivo|Debida\s+Diligencia\s+PLAFT/i.test(bodyText);
   const tieneOfac = /Coincidencias\s+OFAC|Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC/i.test(bodyText);
@@ -2891,8 +3189,22 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
   console.log(`[OFAC] motivoSeleccionado=${motivoSeleccionado} valor='${valorMotivo}'`);
   console.log(`[OFAC] solicitarAclaracionesNo=${solicitarAclaracionesNo}`);
 
+  await completarOtrasCoincidenciasEnGestionMixtaSiExisten(bizagiPage);
+
+  try {
+    const safeMpn = mpn || 'sin_mpn';
+    const file = `artifacts/evidencias_tmp/${safeMpn}__06_bizagi_ofac_campos_completos_antes_siguiente.png`;
+    await bizagiPage.screenshot({ path: file, fullPage: true });
+    console.log(`[Captura][Bizagi] 06_bizagi_ofac_campos_completos_antes_siguiente: ${file}`);
+  } catch (e) {
+    console.log(`[Captura][Bizagi][WARN] No se pudo capturar OFAC: ${String(e)}`);
+  }
+
   const btnSiguiente = bizagiPage.getByRole('button', { name: /Siguiente/i }).first();
   await btnSiguiente.waitFor({ state: 'visible', timeout: 15000 });
+
+  await completarOtrasCoincidenciasEnGestionMixtaSiExisten(bizagiPage);
+
   await btnSiguiente.scrollIntoViewIfNeeded().catch(() => {});
   await btnSiguiente.click({ force: true });
   console.log('[OFAC] Click en Siguiente');
@@ -2907,8 +3219,8 @@ async function completarOfacGestionCoincidenciasBizagi(bizagiPage: Page) {
   console.log('[OFAC] Gestión OFAC completada');
 }
 
-async function completarGestionCoincidenciasCumplimientoBizagi(bizagiPage: Page) {
-  await completarOfacGestionCoincidenciasBizagi(bizagiPage);
+async function completarGestionCoincidenciasCumplimientoBizagi(bizagiPage: Page, mpn?: string) {
+  await completarOfacGestionCoincidenciasBizagi(bizagiPage, mpn);
 }
 
 async function seleccionarFalsoPositivoPlaft(bizagiPage: Page): Promise<boolean> {
@@ -3122,7 +3434,7 @@ async function clickSiguientePlaft(bizagiPage: Page): Promise<void> {
   await bizagiPage.waitForTimeout(1200);
 }
 
-async function completarVerificarPlaftBizagi(bizagiPage: Page) {
+async function completarVerificarPlaftBizagi(bizagiPage: Page, mpn?: string) {
   console.log('[PLAFT] Pantalla PLAFT/Lexis Nexis detectada');
 
   const pantalla = bizagiPage
@@ -3136,6 +3448,16 @@ async function completarVerificarPlaftBizagi(bizagiPage: Page) {
   console.log(`[PLAFT] Falso Positivo seleccionado=${falsoPositivoSeleccionado}`);
 
   await seleccionarNoSolicitarAclaracionesPlaft(bizagiPage);
+
+  try {
+    const safeMpn = mpn || 'sin_mpn';
+    const file = `artifacts/evidencias_tmp/${safeMpn}__07_bizagi_plaft_campos_completos_antes_siguiente.png`;
+    await bizagiPage.screenshot({ path: file, fullPage: true });
+    console.log(`[Captura][Bizagi] 07_bizagi_plaft_campos_completos_antes_siguiente: ${file}`);
+  } catch (e) {
+    console.log(`[Captura][Bizagi][WARN] No se pudo capturar PLAFT: ${String(e)}`);
+  }
+
   await clickSiguientePlaft(bizagiPage);
   console.log('[PLAFT] Gestión PLAFT completada');
 }
@@ -3535,7 +3857,7 @@ export async function abrirSolicitudCumplimientoEnBizagiDesdePortal(
 
   if (yaEstaEnGestion) {
     console.log(`[Bizagi] Navegando directamente a OFAC en pestaña existente sin buscar MPN`);
-    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage, mpn);
   } else {
     // Priorizar el flujo de Admin si el buscador global suele fallar
     const casoEncontrado = await buscarCasoPorMpnEnBizagi(bizagiPage, mpn, { useAdminFallback: true, openIfFound: true });
@@ -3543,7 +3865,7 @@ export async function abrirSolicitudCumplimientoEnBizagiDesdePortal(
       throw new Error(`[CRITICO] No se encontro ninguna fila en Bizagi para '${mpn}'.`);
     }
     await abrirSolicitudCumplimientoBizagiRapido(bizagiPage, mpn);
-    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage);
+    await completarGestionCoincidenciasCumplimientoBizagi(bizagiPage, mpn);
   }
 
   await portalPage.bringToFront().catch(() => {});
@@ -3594,7 +3916,7 @@ export async function abrirSolicitudPlaftEnBizagiDesdePortal(
 
   if (yaEnPantallaPlaft) {
     console.log('[PLAFT] Pestaña existente ya en pantalla PLAFT; ejecutando handler');
-    await completarVerificarPlaftBizagi(bizagiPage);
+    await completarVerificarPlaftBizagi(bizagiPage, mpn);
   } else {
     const casoEncontrado = await buscarCasoPorMpnEnBizagi(bizagiPage, mpn, { useAdminFallback: true, openIfFound: true });
     if (!casoEncontrado) {
@@ -3733,7 +4055,7 @@ export async function abrirSolicitudPlaftEnBizagiDesdePortal(
     }
 
     console.log('[PLAFT][Bizagi] pantalla Verificar PLAFT editable=true');
-    await completarVerificarPlaftBizagi(bizagiPage);
+    await completarVerificarPlaftBizagi(bizagiPage, mpn);
   }
 
   await portalPage.bringToFront().catch(() => {});

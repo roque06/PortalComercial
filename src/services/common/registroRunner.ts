@@ -51,9 +51,17 @@ export async function runRegistros<TRegistro>(
       await onRegistro(registro);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      failedRegistros.push({ identificacion, error: errorMsg });
       console.log(`[ERROR][${identificacion}] ${errorMsg}`);
       await takeErrorScreenshot(page, identificacion);
+
+      const esOmitido = /\[OMITIDO\]/i.test(errorMsg);
+      if (esOmitido) {
+        console.log(`[Runner][OMITIDO] ${identificacion}: omitiendo y continuando`);
+        skippedRegistros.push({ identificacion, razon: errorMsg });
+        continue;
+      }
+
+      failedRegistros.push({ identificacion, error: errorMsg });
 
       if (browserSession.pauseOnRegistroError) {
         await page.pause().catch(() => {});
@@ -61,10 +69,16 @@ export async function runRegistros<TRegistro>(
 
       if (onRegistroError) {
         const action = await onRegistroError(registro, errorMsg, { failedRegistros, skippedRegistros });
-        if (action === 'continue') continue;
+        if (action === 'continue') {
+          console.log(`[Runner][CONTINUE] Error en ${identificacion}. Continuando con siguiente registro.`);
+          continue;
+        }
+        console.log(`[Runner][STOP] Error marcado como crítico para ${identificacion}. Deteniendo batch.`);
+        throw error;
       }
 
-      throw error;
+      console.log(`[Runner][CONTINUE] Sin handler onRegistroError. Continuando con siguiente registro.`);
+      continue;
     } finally {
       if (onRegistroFinally) {
         console.log(`[Loop][${identificacion}] Cleanup de fin de registro.`);
