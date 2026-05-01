@@ -1713,7 +1713,7 @@ if (productoYaAgregado) {
                             }
 
                             console.log('[Producto][Legacy] llamando seleccionarProductoEnSeccionProductos');
-                            await seleccionarProductoEnSeccionProductos(page, seccion, tipoACargar);
+                            await seleccionarProductoEnSeccionProductos(page, seccion, { tipoCuenta: tipoACargar, identificacion: '' } as unknown as RegistroExcel);
 
                             const modalProd = await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
                             if (modalProd) throw new Error('[Producto][CRITICO] Se abrió modal Cancelar proceso de solicitud durante selección de producto; scope incorrecto');
@@ -5695,7 +5695,7 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
 
     if (productoVacio || !productoVisibleAntesDeSeleccion) {
         console.log(`[Producto] Seleccionando producto ${registro.tipoCuenta}`);
-        await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+        await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro);
         const modalAbierto = await modalProductoConfigVisible(page).catch(() => false);
         console.log(`[Producto] Modal configuracion abierto=${modalAbierto}`);
         if (await marcarProductoConfirmadoSiYaVisible(page, registro)) {
@@ -6041,11 +6041,20 @@ async function seleccionarProductoPorDropdownSecundario(
 async function seleccionarProductoEnSeccionProductos(
     page: Page,
     seccionProductos: Locator,
-    tipoCuenta: string
+    registro: RegistroExcel
 ) {
+    const { tipoCuenta } = registro;
+
+    // GUARD IDEMPOTENTE: si ya se confirmó el producto para este registro, no volver a llamar
+    if (productoConfirmadoEnRegistro(registro)) {
+        console.log(`[Producto] Producto ya confirmado en registro ${productoRegistroKey(registro)}; se omite selección/agregar`);
+        return;
+    }
+
     const modalProductoVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
     if (!modalProductoVisible && await productoAgregadoComoTarjetaVisible(page, tipoCuenta).catch(() => false)) {
         console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
+        marcarProductoConfirmado(registro);
         return;
     }
     console.log(`[SeccionProductos] Iniciando seleccion de producto: '${tipoCuenta}'`);
@@ -6390,7 +6399,7 @@ async function etapaSeccionProductosPostSeleccion(
                         productoAgregado = true;
                         break;
                     }
-                    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+                    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
                     await page.waitForTimeout(FAST_UI ? 500 : 1200);
                     continue;
                 }
@@ -6416,7 +6425,7 @@ async function etapaSeccionProductosPostSeleccion(
                     productoAgregado = true;
                     break;
                 }
-                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 500 : 1200);
                 continue;
             }
@@ -6444,7 +6453,7 @@ async function etapaSeccionProductosPostSeleccion(
                     productoAgregado = true;
                     break;
                 }
-                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 500 : 1200);
                 continue;
             }
@@ -6488,7 +6497,7 @@ async function etapaSeccionProductosPostSeleccion(
                 productoAgregado = true;
                 break;
             }
-            await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+            await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
             await page.waitForTimeout(FAST_UI ? 500 : 1200);
         }
     }
@@ -6613,7 +6622,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         // ya que seleccionarProductoEnSeccionProductos ya maneja la espera interna 
         // de forma mas robusta a traves de seleccionarDropdownEnScopePorTexto.
 
-        await seleccionarProductoEnSeccionProductos(page, seccionActualizada, registro.tipoCuenta);
+        await seleccionarProductoEnSeccionProductos(page, seccionActualizada, registro);
         return etapaSeccionProductosPostSeleccion(page, registro, seccionActualizada);
     }
 
@@ -6732,7 +6741,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
     await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
     seccionProductos = await localizarSeccionProductos(page);
     await seccionProductos.waitFor({ state: 'visible', timeout: 10000 }).catch(() => { });
-    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro);
 
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const confirmarProductoAgregado = async () => {
@@ -6987,7 +6996,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                     productoAgregado = true;
                     break;
                 }
-                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 220 : 600);
                 continue;
             }
@@ -7007,7 +7016,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                     productoAgregado = true;
                     break;
                 }
-                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
                 await page.waitForTimeout(FAST_UI ? 220 : 600);
                 continue;
             }
@@ -7031,7 +7040,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                 productoAgregado = true;
                 break;
             }
-            await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta).catch(() => { });
+            await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
             await page.waitForTimeout(FAST_UI ? 220 : 600);
         }
     }
