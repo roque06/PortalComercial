@@ -72,6 +72,8 @@ const cumplimientoMpnsProcesados = new Set<string>();
 const plaftsSinManejadorLogueadas = new Set<string>();
 const productosConfirmadosPorRegistro = new Set<string>();
 const productoProcesadoPorRegistro = new Set<string>();
+const postProductoCompletadoPorRegistro = new Set<string>();
+const postProductoEnProcesoPorRegistro = new Set<string>();
 
 const capturarPasoSeguro = async (page: Page, registro: RegistroExcel | null, paso: string): Promise<string | null> => {
     try {
@@ -525,7 +527,9 @@ async function clickContinuarRobusto(
         console.log(`[GestionDoc] Click en Continuar (${contexto}).`);
 
         await page.waitForTimeout(postWaitMs).catch(() => { });
-        await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
+
+        // Esperar estabilización extendida post-click: desaparición de overlay y settle final
+        await esperarEstabilizacionDespuesDeContinuar(page, contexto, FAST_UI ? 20000 : 25000).catch(() => { });
 
         return true;
     }
@@ -1041,6 +1045,39 @@ async function intentarAvanceRealHaciaTaller(
         const urlDespuesClic = page.url();
         console.log(`[Continuar] esperarFinActualizando completado. url=${urlDespuesClic}`);
 
+        // Esperar ventana extendida por post-producto (antes de clasificar destino)
+        const ventanaPostProductoMs = FAST_UI ? 10000 : 15000;
+        const inicioPostProducto = Date.now();
+        console.log(`[PostProducto][PostClick] esperando pantalla post-producto durante ${ventanaPostProductoMs}ms...`);
+
+        let postProductoDetectado = false;
+        const pollMs = 400;
+        while (Date.now() - inicioPostProducto < ventanaPostProductoMs) {
+            const enPostProducto = await asegurarPantallaPostProductoAntesDeTaller(page).catch(() => false);
+            if (enPostProducto) {
+                postProductoDetectado = true;
+                console.log(`[PostProducto][PostClick] detectado después del click; completando antes de clasificar destino`);
+                break;
+            }
+            await page.waitForTimeout(pollMs);
+        }
+
+        if (postProductoDetectado) {
+            const completoPostProducto = await asegurarPostProductoCompletoUnaVez(
+                page,
+                options?.registro ?? null,
+                null,
+                contexto,
+                { required: false }
+            ).catch(() => false);
+            if (completoPostProducto) {
+                console.log(`[PostProducto][PostClick] completado exitosamente tras click`);
+                return 'post-producto';
+            } else {
+                console.log(`[PostProducto][PostClick] detectado pero no se pudo completar; continuando con clasificación de destino`);
+            }
+        }
+
         const verificacionEspecialDespuesClick = await procesarVerificacionesEspeciales(page).catch(() => null);
         if (verificacionEspecialDespuesClick?.tipo === 'cumplimiento') {
             if (verificacionEspecialDespuesClick.estado === 'post-producto') {
@@ -1069,12 +1106,23 @@ async function intentarAvanceRealHaciaTaller(
             const enPantallaPrevia = await estaEnPantallaPreProductos(page).catch(() => false);
             if (enPantallaPrevia) {
                 console.log(`[Continuar] URL no cambio y seguimos en pantalla previa. Intentando completar campos faltantes...`);
-                const completoCampos = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
-                if (completoCampos) {
-                    console.log(`[Continuar] Campos completados tras rechazo. Scrolleando a seccion productos y reintentando Continuar...`);
-                    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => { });
-                    await page.waitForTimeout(FAST_UI ? 350 : 800);
-                    continue;
+                const enPostProducto = await asegurarPantallaPostProductoAntesDeTaller(page);
+                if (enPostProducto) {
+                    const completoCampos = await asegurarPostProductoCompletoUnaVez(
+                        page,
+                        (options as any)?.registro ?? null,
+                        (options as any)?.capturas ?? null,
+                        (options as any)?.contexto ?? 'clickContinuarRobusto-fallback',
+                        { required: false }
+                    );
+                    if (completoCampos) {
+                        console.log(`[Continuar] Campos completados tras rechazo. Scrolleando a seccion productos y reintentando Continuar...`);
+                        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => { });
+                        await page.waitForTimeout(FAST_UI ? 350 : 800);
+                        continue;
+                    }
+                } else {
+                    console.log(`[PostProducto][Skip] No se ejecuta compuerta porque no se detectó post-producto en pantalla previa`);
                 }
             } else {
                 console.log(`[Continuar] URL no cambio pero ya NO estamos en pantalla previa (wizard SPA). Verificando destino...`);
@@ -2600,6 +2648,45 @@ async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
     }
 
     return false;
+}
+
+async function esperarEstabilizacionDespuesDeContinuar(
+    page: Page,
+    contexto: string,
+    timeoutMs = 25000
+): Promise<void> {
+    // Espera a que la solicitud se estabilice después de un click en Continuar
+    // Verifica desaparición de overlay/actualización y settle final
+    const inicio = Date.now();
+    const txtActualizando = page.getByText(/Actualizando solicitud/i).first();
+    const overlaysReales = page.locator(
+        '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible'
+    );
+
+    console.log(`[Continuar][Estabilizar] inicio contexto='${contexto}'`);
+
+    // Fase 1: Esperar desaparición de overlay "Actualizando solicitud"
+    while (Date.now() - inicio < timeoutMs) {
+        const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
+        const overlayCount = await overlaysReales.count().catch(() => 0);
+
+        if (!actualizandoVisible && overlayCount === 0) {
+            console.log(`[Continuar][Estabilizar] actualizandoVisible=false`);
+            break;
+        }
+
+        if (actualizandoVisible || overlayCount > 0) {
+            console.log(
+                `[Continuar][Estabilizar] actualizandoVisible=${actualizandoVisible}, overlayCount=${overlayCount}`
+            );
+        }
+
+        await page.waitForTimeout(300);
+    }
+
+    // Fase 2: Settle final para que DOM se estabilice completamente
+    await page.waitForTimeout(FAST_UI ? 800 : 1200);
+    console.log(`[Continuar][Estabilizar] pantalla estable`);
 }
 
 async function estaEnPantallaPreProductos(page: Page) {
@@ -5102,6 +5189,92 @@ async function asegurarPantallaPostProductoAntesDeTaller(page: Page) {
 
     console.log('[PostProducto][WARN] No se pudo detectar pantalla post-producto (Nivel de estudio / Direccion).');
     return false;
+}
+
+async function asegurarPostProductoCompletoUnaVez(
+    page: Page,
+    registro: RegistroExcel | null,
+    capturas: string[] | null,
+    contexto: string,
+    options?: { required?: boolean }
+): Promise<boolean> {
+    // Compuerta única para completar post-producto: idempotente, sin reentrada
+    // GUARD INICIAL: verificar que estamos en post-producto ANTES de intentar completar
+    const enPostProducto = await asegurarPantallaPostProductoAntesDeTaller(page);
+
+    if (!enPostProducto) {
+        console.log(`[PostProducto][UnaVez] no aplica; pantalla actual no es post-producto contexto=${contexto}`);
+        return false;
+    }
+
+    const required = options?.required ?? true;
+    const keyRegistro = registro
+        ? `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase()
+        : null;
+
+    // Si ya está completado, solo validar y retornar
+    if (keyRegistro && postProductoCompletadoPorRegistro.has(keyRegistro)) {
+        console.log(`[PostProducto][UnaVez] Ya completado para ${keyRegistro}; validando`);
+        const esValido = await asegurarPantallaPostProductoAntesDeTaller(page).catch(() => false);
+        if (!esValido) {
+            console.log(`[PostProducto][UnaVez] Validación falló después de completado anteriormente`);
+            return false;
+        }
+        console.log(`[PostProducto][UnaVez] Validación OK, retornando sin repetir llenado`);
+        return true;
+    }
+
+    // Si está en proceso, no reentrar
+    if (keyRegistro && postProductoEnProcesoPorRegistro.has(keyRegistro)) {
+        throw new Error(`[PostProducto][GuardUnico] Post-producto ya en proceso para ${keyRegistro}; no se permite reentrada`);
+    }
+
+    // Marcar como en proceso
+    if (keyRegistro) {
+        postProductoEnProcesoPorRegistro.add(keyRegistro);
+        console.log(`[PostProducto][GuardUnico] iniciando llenado único key=${keyRegistro}`);
+    }
+
+    // Completar post-producto
+    let completado = false;
+    try {
+        completado = await completarInformacionClientePostProductoAntesDeTaller(
+            page,
+            { required },
+            registro
+        );
+    } catch (e) {
+        if (keyRegistro) postProductoEnProcesoPorRegistro.delete(keyRegistro);
+        throw new Error(`[PostProducto][UnaVez] No se pudo completar: ${String(e)}`);
+    }
+
+    if (!completado) {
+        if (keyRegistro) postProductoEnProcesoPorRegistro.delete(keyRegistro);
+        return false;
+    }
+
+    // Validar que quedó completo
+    let esValido = false;
+    try {
+        esValido = await asegurarPantallaPostProductoAntesDeTaller(page);
+    } catch (e) {
+        if (keyRegistro) postProductoEnProcesoPorRegistro.delete(keyRegistro);
+        throw new Error(`[PostProducto][UnaVez] Validación falló: ${String(e)}`);
+    }
+
+    if (!esValido) {
+        if (keyRegistro) postProductoEnProcesoPorRegistro.delete(keyRegistro);
+        throw new Error(`[PostProducto][UnaVez] Post-producto quedó incompleto tras completación`);
+    }
+
+    // Marcar como completado SOLO después de validación OK
+    if (keyRegistro) {
+        postProductoCompletadoPorRegistro.add(keyRegistro);
+        postProductoEnProcesoPorRegistro.delete(keyRegistro);
+        console.log(`[PostProducto][GuardUnico] marcado completado key=${keyRegistro}`);
+    }
+
+    return true;
 }
 
 async function completarInformacionClientePostProductoAntesDeTaller(
@@ -7995,7 +8168,13 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         if (postProductoLlenadoDesdeCumplimiento) return;
         console.log('[Relacionados] Pantalla post-producto recibida desde cumplimiento, no se hará Continuar adicional');
         console.log('[PostProducto] Iniciando llenado inmediatamente después de OFAC');
-        const completo = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true }, registro);
+        const completo = await asegurarPostProductoCompletoUnaVez(
+            page,
+            registro,
+            null,
+            'llenarPostProductoPostOfac',
+            { required: true }
+        );
         if (!completo) {
             throw new Error('[CRITICO] No se pudo completar la pantalla post-producto después de OFAC.');
         }
@@ -8043,9 +8222,20 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
                 const postProductoNormalDetectado = await esperarPostProductoNormalSinVerificaciones(page);
                 if (postProductoNormalDetectado) {
                     console.log('[PostProducto][Normal] Iniciando llenado después de producto confirmado');
-                    const completoPostProductoNormal = await completarInformacionClientePostProductoAntesDeTaller(page, { required: true });
-                    if (completoPostProductoNormal) {
-                        console.log('[PostProducto][Normal] Llenado completado');
+                    const enPostProductoAhora = await asegurarPantallaPostProductoAntesDeTaller(page);
+                    if (enPostProductoAhora) {
+                        const completoPostProductoNormal = await asegurarPostProductoCompletoUnaVez(
+                            page,
+                            null,
+                            null,
+                            'etapaRelacionadosYAsociacion postProductoNormalDetectado',
+                            { required: true }
+                        );
+                        if (completoPostProductoNormal) {
+                            console.log('[PostProducto][Normal] Llenado completado');
+                        }
+                    } else {
+                        console.log('[PostProducto][Skip] No se ejecuta compuerta porque esperarPostProductoNormalSinVerificaciones detectó false en verificación fina');
                     }
                 }
             }
@@ -8055,9 +8245,20 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         }
     }
 
-    const completoPostProductoInicial = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false });
-    if (completoPostProductoInicial) {
-        await page.waitForTimeout(FAST_UI ? 250 : 700);
+    const enPostProductoAlInicio = await asegurarPantallaPostProductoAntesDeTaller(page);
+    if (enPostProductoAlInicio) {
+        const completoPostProductoInicial = await asegurarPostProductoCompletoUnaVez(
+            page,
+            null,
+            null,
+            'etapaRelacionadosYAsociacion postProductoInicial',
+            { required: false }
+        );
+        if (completoPostProductoInicial) {
+            await page.waitForTimeout(FAST_UI ? 250 : 700);
+        }
+    } else {
+        console.log('[PostProducto][Skip] No se ejecuta compuerta porque seguimos en Productos/no post-producto');
     }
 
     const yaEnTaller = await esperarPantallaTallerProductos(page, { timeoutMs: FAST_UI ? 1500 : 3000 });
@@ -8128,16 +8329,27 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
             await llenarPostProductoPostOfac();
             continue;
         }
-        const completoPostProducto = await completarInformacionClientePostProductoAntesDeTaller(page, { required: false }, registro);
-        if (completoPostProducto) {
-            await page.waitForTimeout(FAST_UI ? 300 : 800);
-            // Si el portal nos regreso a la pantalla de datos del cliente, navegar de vuelta a productos
-            const enProductosAhora = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
-            if (!enProductosAhora) {
-                console.log('[Relacionados] Campos completados. Navegando de vuelta a la pantalla de productos...');
-                await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro).catch(() => { });
+        const enPostProductoEnLoop = await asegurarPantallaPostProductoAntesDeTaller(page);
+        if (enPostProductoEnLoop) {
+            const completoPostProducto = await asegurarPostProductoCompletoUnaVez(
+                page,
+                registro,
+                null,
+                'etapaRelacionadosYAsociacion normalLoop',
+                { required: false }
+            );
+            if (completoPostProducto) {
+                await page.waitForTimeout(FAST_UI ? 300 : 800);
+                // Si el portal nos regreso a la pantalla de datos del cliente, navegar de vuelta a productos
+                const enProductosAhora = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+                if (!enProductosAhora) {
+                    console.log('[Relacionados] Campos completados. Navegando de vuelta a la pantalla de productos...');
+                    await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro).catch(() => { });
+                }
+                continue;
             }
-            continue;
+        } else {
+            console.log('[PostProducto][Skip] No se ejecuta compuerta en loop porque seguimos en Productos/no post-producto');
         }
 
         seccionProductos = await localizarSeccionProductos(page);
