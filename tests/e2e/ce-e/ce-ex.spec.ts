@@ -1,6 +1,7 @@
 import { test, type Locator, type Page } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { capturarDiagnosticoDom, capturarDiagnosticoNuevaSolicitud } from '../../helpers/diagnosticoDom';
 import {
   seleccionarDefaultSiVacio,
   llenarInputMask,
@@ -16,8 +17,6 @@ import {
 } from '../../helpers/uiHelpers';
 import {
   leerRegistrosDesdeExcel,
-  cancelarCasoEnBizagiDesdePortal,
-  extraerCasoActivoMpn,
   seleccionarInstrumentoRobusto,
   seleccionarDropdownPorCampo,
   esperarYClickReintentarPaisIdentificacion,
@@ -30,6 +29,10 @@ import {
   seleccionarProductoCuentaEfectivoExistente,
   type RegistroExcel,
 } from '../../helpers/productos/cuenta-efectivo/existente/helpers';
+import {
+  cancelarCasoEnBizagiDesdePortal,
+  extraerCasoActivoMpn,
+} from '../../helpers/ceExBizagi';
 import {
   cerrarModalFinalizadaRapido as cerrarModalFinalizadaRapidoShared,
   cerrarModalSolicitudFinalizada as cerrarModalSolicitudFinalizadaShared,
@@ -64,6 +67,9 @@ import { abrirArchivoAlFinal, limpiarEvidenciasTemporales } from '../../../src/s
 import { closeBrowserSession, runRegistros } from '../../../src/services/common/registroRunner';
 
 const capturas: string[] = [];
+
+const PORTAL_BASE_URL = (process.env.PW_PORTAL_URL ?? process.env.PORTAL_URL ?? 'https://srvqacgowb01.local.bsc.com:5000').replace(/\/+$/, '');
+const PORTAL_MULTIPRODUCT_URL = `${PORTAL_BASE_URL}/requests/create/multiproduct`;
 
 const getBotonContinuar = (page: Page) =>
   page.locator('button:visible').filter({ hasText: /^Continuar\b/i }).last();
@@ -105,15 +111,136 @@ async function localizarSeccionProductos(page: Page) {
 }
 
 async function seleccionarCategoriaEnSeccionProductos(page: Page, seccionProductos: Locator) {
-  return seleccionarCategoriaEnSeccionProductosShared(page, seccionProductos, {
-    panelQuickTimeout: LIST_PANEL_QUICK_TIMEOUT,
-    panelTimeout: LIST_PANEL_TIMEOUT,
-    scopeRetryWaitMs: LIST_SCOPE_RETRY_WAIT_MS,
-  }, {
-    onBeforeOpen: async (currentPage) => {
-      await cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false);
-    },
-  });
+  console.log(`[Producto][Seleccion] Sección Productos visible`);
+
+  // Estrategia 1: Buscar por label "Categoría de producto"
+  console.log(`[Producto][Seleccion] Buscando dropdown Categoría por label`);
+  const labelCategoriaBuscadores = [
+    seccionProductos.locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria de producto")]'),
+    seccionProductos.getByText(/Categor[ií]a de producto/i),
+  ];
+
+  let categoriaDropdown: Locator | null = null;
+  for (const labelLocator of labelCategoriaBuscadores) {
+    const visible = await labelLocator.isVisible().catch(() => false);
+    if (visible) {
+      // Encontró el label, ahora buscar el dropdown cercano
+      try {
+        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+        if (dropdownVisible) {
+          console.log(`[Producto][Seleccion] Dropdown Categoría encontrado por label`);
+          categoriaDropdown = dropdownEnParent;
+          break;
+        }
+      } catch (e) {
+        console.log(`[Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+      }
+    }
+  }
+
+  // Estrategia 2: Fallback posicional - usar el primer dropdown visible
+  if (!categoriaDropdown) {
+    console.log(`[Producto][Seleccion] Dropdown Categoría no encontrado por label; usando fallback posicional`);
+    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+    const count = await dropdowns.count().catch(() => 0);
+    if (count >= 1) {
+      console.log(`[Producto][Seleccion] Dropdown Categoría encontrado por posición 1/${count}`);
+      categoriaDropdown = dropdowns.first();
+    }
+  }
+
+  if (!categoriaDropdown) {
+    console.log(`[Producto][Seleccion][ERROR] No se encontró dropdown de Categoría de producto`);
+    await capturarDiagnosticoDom(page, `ce_ex_producto_categoria_dropdown_no_encontrado_${Date.now()}`, [
+      'text=/Categor[ií]a de producto/i',
+      'text=/Producto/i',
+      '[role="combobox"]',
+      '.p-dropdown',
+      '.p-select',
+      '.p-dropdown-trigger',
+      'button',
+      'input',
+    ], {
+      motivo: 'categoria_dropdown_no_encontrado',
+    });
+    throw new Error("[CRITICO] No se encontro dropdown de 'Categoria de producto' en la seccion de Productos.");
+  }
+
+  // Verificar si el dropdown ya tiene valor seleccionado
+  const labelDropdown = categoriaDropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+  let valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+  if (!esValorDropdownVacio(valor)) {
+    console.log(`[Producto][Seleccion] Categoría ya seleccionada: ${valor}`);
+    return;
+  }
+
+  // Abrir el dropdown y seleccionar la categoría
+  for (let intento = 1; intento <= 3; intento++) {
+    console.log(`[Producto][Seleccion] Seleccionando categoría: Cuentas de Efectivo (intento ${intento}/3)`);
+    await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+    await categoriaDropdown.scrollIntoViewIfNeeded().catch(() => { });
+    await categoriaDropdown.click({ force: true }).catch(() => { });
+    await page.waitForTimeout(300);
+
+    const combobox = categoriaDropdown.locator('[role="combobox"]').first();
+    const panelId = await combobox.getAttribute("aria-controls").catch(() => null);
+    let panel: Locator | null = null;
+    if (panelId) {
+      const byId = page.locator(`#${panelId}`);
+      const visible = await byId.waitFor({ state: "visible", timeout: LIST_PANEL_QUICK_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+      if (visible) panel = byId;
+    }
+    if (!panel) {
+      const fallback = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').last();
+      const visible = await fallback.waitFor({ state: "visible", timeout: LIST_PANEL_QUICK_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+      if (visible) panel = fallback;
+    }
+
+    if (panel) {
+      // Reintentar si hay botón de reintentar
+      const btnRetryPanel = panel
+        .locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button.p-button-warning')
+        .first();
+      if (await btnRetryPanel.isVisible().catch(() => false)) {
+        await btnRetryPanel.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(LIST_SCOPE_RETRY_WAIT_MS);
+      }
+
+      // Buscar y seleccionar la opción "Cuentas de Efectivo"
+      const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+      const listo = await items.first().waitFor({ state: "visible", timeout: LIST_PANEL_TIMEOUT })
+        .then(() => true)
+        .catch(() => false);
+      const countItems = await items.count().catch(() => 0);
+      if (listo && countItems > 0) {
+        const itemCategoria = items.filter({ hasText: /Cuentas de Efectivo/i }).first();
+        if (await itemCategoria.isVisible().catch(() => false)) {
+          console.log(`[Producto][Seleccion] Seleccionando: Cuentas de Efectivo`);
+          await itemCategoria.click({ force: true }).catch(() => { });
+        } else {
+          console.log(`[Producto][Seleccion] Seleccionando: primera opción (índice 0)`);
+          await items.nth(0).click({ force: true }).catch(() => { });
+        }
+      }
+    }
+
+    await page.waitForTimeout(200);
+    valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+    if (!esValorDropdownVacio(valor)) {
+      console.log(`[Producto][Seleccion] Categoría seleccionada: ${valor}`);
+      return;
+    }
+
+    await page.waitForTimeout(LIST_SCOPE_RETRY_WAIT_MS);
+  }
+
+  throw new Error("[CRITICO] No se pudo seleccionar 'Categoria de producto' en la seccion de Productos.");
 }
 
 async function leerValorDropdownEnScope(
@@ -334,13 +461,39 @@ async function cerrarModalCancelarProcesoSiVisible(page: Page) {
 
 async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
   const inicio = Date.now();
+  const EARLY_EXIT_CHECK_MS = 1500; // Verificar tempranamente si el texto aparece
+
   const txtActualizando = page.getByText(/Actualizando solicitud/i).first();
   const txtDepurando = page.getByText(/Depurando solicitante|Consultando datos del solicitante/i).first();
-    const overlays = page.locator(
-        '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible, [role="progressbar"]:visible'
-    );
+  const overlays = page.locator(
+    '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible, [role="progressbar"]:visible'
+  );
 
-  while (Date.now() - inicio < timeoutMs) {
+  // Early exit check: si "Actualizando solicitud" no aparece en los primeros 1500ms, salir inmediatamente
+  const earlyCheckStart = Date.now();
+  while (Date.now() - earlyCheckStart < EARLY_EXIT_CHECK_MS) {
+    const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
+    const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
+    const overlayCount = await overlays.count().catch(() => 0);
+
+    if (actualizandoVisible || depurandoVisible || overlayCount > 0) {
+      // El spinner/actualizando SÍ apareció, esperar a que desaparezca
+      console.log('[Depurar][Continuar] Actualizando solicitud detectado; esperando fin');
+      break;
+    }
+
+    if (Date.now() - earlyCheckStart >= EARLY_EXIT_CHECK_MS) {
+      // El spinner nunca apareció, salir inmediatamente sin esperar timeout completo
+      console.log('[Depurar][Continuar] Actualizando solicitud no detectado en 1500ms; continuando');
+      return true;
+    }
+
+    await page.waitForTimeout(100);
+  }
+
+  // Si llegamos aquí, el spinner SÍ apareció. Esperar a que desaparezca.
+  const mainWaitStart = Date.now();
+  while (Date.now() - mainWaitStart < timeoutMs) {
     await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
     const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
     const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
@@ -1266,46 +1419,298 @@ async function seleccionarProductoEnSeccionProductos(
   seccionProductos: Locator,
   tipoCuenta: string
 ) {
-  return seleccionarProductoCuentaEfectivoExistente(page, seccionProductos, tipoCuenta, {
-    confirmarSeleccionProductoRapida,
-    detectarProductoSeleccionadoEnUI,
-    esValorDropdownVacio,
-    escapeRegexText,
-    extraerCodigoProducto,
-    leerValorDropdownEnScope,
-    seleccionarDropdownEnScopePorTexto,
-    seleccionarProductoPorDropdownSecundario,
-    seleccionarDropdownFiltrableConReintentar: async (currentPage, textoFiltro) =>
-      seleccionarDropdownFiltrableConReintentar(
-        currentPage,
-        'Producto',
-        { texto: textoFiltro },
-        { maxIntentos: 2, esperaMs: 240, timeoutCampoMs: 9000, timeoutPanelMs: 4500, usarFiltro: true }
-      ),
-    beforeAttempt: async (currentPage) => {
-      if (await modalProductoConfigVisible(currentPage)) return;
-      await cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false);
-      await clickReintentarListaSiVisible(currentPage, 'Producto', LIST_RETRY_CLICK_TIMEOUT).catch(() => false);
-    },
-    maxIntentos: PRODUCTO_MAX_INTENTOS,
-    probeTimeoutMs: LIST_PROBE_TIMEOUT,
-    retryWaitMs: PRODUCTO_RETRY_WAIT_MS,
-  });
+  console.log(`[Producto][Seleccion] Buscando dropdown Producto por label`);
+
+  // Estrategia 1: Buscar por label "Producto"
+  const labelProductoBuscadores = [
+    seccionProductos.getByText(/^Producto$/i),
+  ];
+
+  let productoDropdown: Locator | null = null;
+  for (const labelLocator of labelProductoBuscadores) {
+    const visible = await labelLocator.isVisible().catch(() => false);
+    if (visible) {
+      // Encontró el label, ahora buscar el dropdown cercano
+      try {
+        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+        if (dropdownVisible) {
+          console.log(`[Producto][Seleccion] Dropdown Producto encontrado por label`);
+          productoDropdown = dropdownEnParent;
+          break;
+        }
+      } catch (e) {
+        console.log(`[Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+      }
+    }
+  }
+
+  // Estrategia 2: Fallback posicional - usar el segundo dropdown visible (el primero es Categoría)
+  if (!productoDropdown) {
+    console.log(`[Producto][Seleccion] Dropdown Producto no encontrado por label; usando fallback posicional`);
+    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+    const count = await dropdowns.count().catch(() => 0);
+    if (count >= 2) {
+      console.log(`[Producto][Seleccion] Dropdown Producto encontrado por posición 2/${count}`);
+      productoDropdown = dropdowns.nth(1);
+    } else if (count === 1) {
+      console.log(`[Producto][Seleccion] Solo 1 dropdown visible; usando como Producto`);
+      productoDropdown = dropdowns.nth(0);
+    }
+  }
+
+  if (!productoDropdown) {
+    console.log(`[Producto][Seleccion][ERROR] No se encontró dropdown de Producto`);
+    await capturarDiagnosticoDom(page, `ce_ex_producto_producto_dropdown_no_encontrado_${Date.now()}`, [
+      'text=/^Producto$/i',
+      '[role="combobox"]',
+      '.p-dropdown',
+      '.p-select',
+      'button',
+    ], {
+      motivo: 'producto_dropdown_no_encontrado',
+    });
+    throw new Error("[CRITICO] No se encontro dropdown de 'Producto' en la seccion de Productos.");
+  }
+
+  console.log(`[Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
+
+  // Intentar usar la estrategia compartida primero
+  try {
+    return await seleccionarProductoCuentaEfectivoExistente(page, seccionProductos, tipoCuenta, {
+      confirmarSeleccionProductoRapida,
+      detectarProductoSeleccionadoEnUI,
+      esValorDropdownVacio,
+      escapeRegexText,
+      extraerCodigoProducto,
+      leerValorDropdownEnScope,
+      seleccionarDropdownEnScopePorTexto,
+      seleccionarProductoPorDropdownSecundario,
+      seleccionarDropdownFiltrableConReintentar: async (currentPage, textoFiltro) =>
+        seleccionarDropdownFiltrableConReintentar(
+          currentPage,
+          'Producto',
+          { texto: textoFiltro },
+          { maxIntentos: 2, esperaMs: 240, timeoutCampoMs: 9000, timeoutPanelMs: 4500, usarFiltro: true }
+        ),
+      beforeAttempt: async (currentPage) => {
+        if (await modalProductoConfigVisible(currentPage)) return;
+        await cerrarModalCancelarProcesoSiVisible(currentPage).catch(() => false);
+        await clickReintentarListaSiVisible(currentPage, 'Producto', LIST_RETRY_CLICK_TIMEOUT).catch(() => false);
+      },
+      maxIntentos: PRODUCTO_MAX_INTENTOS,
+      probeTimeoutMs: LIST_PROBE_TIMEOUT,
+      retryWaitMs: PRODUCTO_RETRY_WAIT_MS,
+    });
+  } catch (error) {
+    console.log(`[Producto][Seleccion] Error en selección compartida: ${String(error)}; intentando fallback directo`);
+
+    // Fallback directo basado en ce-new.spec.ts
+    try {
+      await productoDropdown.click({ timeout: 3000 }).catch(async () => {
+        await productoDropdown.click({ force: true, timeout: 3000 });
+      });
+
+      const panel = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
+      const panelVisible = await panel.isVisible({ timeout: 5000 }).catch(() => false);
+      if (!panelVisible) {
+        throw new Error(`[Producto][CRITICO] No abrió panel Producto en fallback directo tipoCuenta='${tipoCuenta}'`);
+      }
+
+      const opciones = panel.locator('li[role="option"], .p-dropdown-item, .p-select-option');
+      const total = await opciones.count().catch(() => 0);
+      if (total === 0) {
+        throw new Error(`[Producto][CRITICO] Panel abierto pero sin opciones para tipoCuenta='${tipoCuenta}'`);
+      }
+
+      // Buscar por tipo de cuenta
+      const nombreRegex = tipoCuenta
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase();
+
+      for (let i = 0; i < total; i++) {
+        const texto = (await opciones.nth(i).innerText().catch(() => '')).trim();
+        const normalizado = texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+        if (normalizado.includes(nombreRegex)) {
+          console.log(`[Producto][Seleccion] Seleccionando opción: ${texto}`);
+          await opciones.nth(i).click({ force: true }).catch(() => { });
+          console.log(`[Producto][Seleccion] Producto seleccionado`);
+          return;
+        }
+      }
+
+      // Si no encuentra por tipo, usar la primera opción
+      console.log(`[Producto][Seleccion] Tipo '${tipoCuenta}' no encontrado; seleccionando primera opción`);
+      await opciones.nth(0).click({ force: true }).catch(() => { });
+      console.log(`[Producto][Seleccion] Producto seleccionado`);
+    } catch (fallbackError) {
+      console.log(`[Producto][Seleccion] Fallback directo también falló: ${String(fallbackError)}`);
+      throw error; // Lanzar el error original, no el del fallback
+    }
+  }
+}
+
+async function estaEnFormularioNuevaSolicitudMultiproducto(page: Page): Promise<boolean> {
+    console.log(`[CE-EX][TRACE] estaEnFormularioNuevaSolicitudMultiproducto INIT`);
+    try {
+        const señales = {
+            solicitudNueva: await page.getByText(/Solicitud Nueva/i).first().isVisible({ timeout: 1000 }).catch(() => false),
+            infoBasica: await page.getByText(/Informaci[oó]n b[aá]sica/i).first().isVisible({ timeout: 1000 }).catch(() => false),
+            verificarSolicitante: await page.getByText(/Verificar solicitante/i).first().isVisible({ timeout: 1000 }).catch(() => false),
+            oficial: await page.locator('label').filter({ hasText: /^Oficial$/i }).first().isVisible({ timeout: 1000 }).catch(() => false),
+            promotor: await page.locator('label').filter({ hasText: /^Promotor$/i }).first().isVisible({ timeout: 1000 }).catch(() => false),
+            relacionBanco: await page.locator('label').filter({ hasText: /Relaci[oó]n con el banco/i }).first().isVisible({ timeout: 1000 }).catch(() => false),
+            identificacion: await page.locator('label').filter({ hasText: /N[uú]mero de identificaci[oó]n/i }).first().isVisible({ timeout: 1000 }).catch(() => false),
+        };
+
+        const totalSeñales = Object.values(señales).filter(v => v).length;
+        const enFormulario = totalSeñales >= 3;
+
+        console.log(`[NuevaSolicitud][Detect] solicitudNueva=${señales.solicitudNueva} infoBasica=${señales.infoBasica} verificarSolicitante=${señales.verificarSolicitante} oficial=${señales.oficial} => ${enFormulario}`);
+        return enFormulario;
+    } catch (e) {
+        console.log(`[NuevaSolicitud][Detect][WARN] Error detectando formulario: ${String(e)}`);
+        return false;
+    }
+}
+
+async function asegurarPortalEnMultiproducto(page: Page, contexto: string) {
+    console.log(`[CE-EX][TRACE] asegurarPortalEnMultiproducto INIT contexto=${contexto} url=${page.url()}`);
+    const enMultiproducto = async () => /\/requests\/create\/multiproduct/i.test(page.url());
+    if (await enMultiproducto()) {
+        console.log(`[CE-EX][TRACE] asegurarPortalEnMultiproducto - ya estamos en multiproducto, retornando true`);
+        return true;
+    }
+
+    console.log(`[${contexto}] Forzando goto directo a multiproducto...`);
+    await page.goto(PORTAL_MULTIPRODUCT_URL, { waitUntil: 'domcontentloaded' }).catch(() => { });
+    await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 15000 }).catch(() => { });
+    if (await enMultiproducto()) return true;
+
+    console.log(`[${contexto}] Goto directo no basto. Intentando location.assign...`);
+    await page.evaluate((destino) => {
+        window.location.assign(destino);
+    }, PORTAL_MULTIPRODUCT_URL).catch(() => { });
+    await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 15000 }).catch(() => { });
+    if (await enMultiproducto()) return true;
+
+    console.log(`[${contexto}] location.assign no basto. Intentando router/link...`);
+    const navegado = await page.evaluate(() => {
+        const link = document.querySelector<HTMLAnchorElement>('a[href="/requests/create/multiproduct"]');
+        if (!link) return false;
+        link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        return true;
+    }).catch(() => false);
+    if (navegado) {
+        await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 15000 }).catch(() => { });
+    }
+
+    const exito = await enMultiproducto();
+    console.log(`[${contexto}] URL tras forzado directo: ${page.url()} | exito=${exito}`);
+    return exito;
+}
+
+async function asegurarPantallaNuevaSolicitudMultiproducto(page: Page, contexto: string): Promise<void> {
+    console.log(`[CE-EX][TRACE] asegurarPantallaNuevaSolicitudMultiproducto INIT contexto=${contexto} url=${page.url()}`);
+    const yaEnFormulario = await estaEnFormularioNuevaSolicitudMultiproducto(page);
+    if (yaEnFormulario) {
+        console.log(`[NuevaSolicitud] formulario ya visible contexto=${contexto}`);
+        return;
+    }
+
+    console.log(`[NuevaSolicitud][Recovery] formulario no visible; navegando a Solicitud multiproducto contexto=${contexto}`);
+
+    // Detectar y hacer click en Solicitud multiproducto
+    const btnSolicitudMultiproducto = page
+        .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
+        .first();
+
+    const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
+        .waitFor({ state: 'visible', timeout: 5000 })
+        .then(() => true)
+        .catch(() => false);
+
+    if (puedeAbrirSolicitudMultiproducto) {
+        console.log(`[NuevaSolicitud][Recovery] click en Solicitud multiproducto`);
+        await btnSolicitudMultiproducto.click({ force: true });
+        await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 30000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded');
+        await page.waitForTimeout(1000);
+    }
+
+    // Verificar que el formulario ahora está visible
+    const formularioAhora = await estaEnFormularioNuevaSolicitudMultiproducto(page);
+    if (!formularioAhora) {
+        await capturarDiagnosticoNuevaSolicitud(page, `ce_ex_navegacion_multiproducto_fallo_${contexto}`).catch(() => {});
+        throw new Error(`[NuevaSolicitud][CRITICO] No se pudo abrir formulario de Solicitud multiproducto después de omisión/reinicio. contexto=${contexto}`);
+    }
+
+    console.log(`[NuevaSolicitud][Recovery] formulario listo=true contexto=${contexto}`);
+}
+
+async function estaEnPantallaProductos(page: Page) {
+    const categoriaVisible = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+    const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+    const agregarRelacionadoVisible = await page.getByRole('button', { name: /Agregar relacionado/i }).isVisible().catch(() => false);
+    const seccionProductos = await localizarSeccionProductos(page).catch(() => null);
+    let dropdownCount = 0;
+    if (seccionProductos) {
+        dropdownCount = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible').count().catch(() => 0);
+    }
+    if (dropdownCount === 0) {
+        dropdownCount = await page.locator('body').locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, select:visible').count().catch(() => 0);
+    }
+    const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
+    const signals = [categoriaVisible, productoVisible, agregarRelacionadoVisible, dropdownCount >= 1, productosTextVisible];
+    const signalsPresent = signals.filter(Boolean).length;
+    return signalsPresent >= 3;
+}
+
+async function esperarFinConsultaSolicitante(page: Page, timeoutMs = 120000) {
+    const spinnerRegex = /Consultando datos del solicitante|Depurando solicitante|Creando solicitud/i;
+    const modalCasosActivos = page
+        .locator('.p-dialog:visible, [role="dialog"]:visible')
+        .filter({ hasText: /Casos?\s+activos?|caso activo|solicitud activa|caso ya existe|ya existe un caso/i })
+        .first();
+
+    await page.getByText(spinnerRegex).first().waitFor({ state: 'visible', timeout: 2500 }).catch(() => { });
+
+    const inicio = Date.now();
+    while (Date.now() - inicio < timeoutMs) {
+        const modalVisible = await modalCasosActivos.isVisible().catch(() => false);
+        if (modalVisible) {
+            console.log('[Depurar][Continuar] Modal de casos activos detectado durante la espera post-Depurar.');
+            return;
+        }
+
+        const spinnerVisible = await page.getByText(spinnerRegex).first().isVisible().catch(() => false);
+        if (!spinnerVisible) return;
+
+        await page.waitForTimeout(250).catch(() => { });
+    }
 }
 
 async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
+  console.log(`[CE-EX][TRACE] etapaFlujoRegistro INIT - registro=${registro.identificacion}`);
   const maxIntentosCasoActivo = 2;
 
   for (let intento = 1; intento <= maxIntentosCasoActivo; intento++) {
+    console.log(`[CE-EX][TRACE] etapaFlujoRegistro intento=${intento} - registro=${registro.identificacion}`);
     await page.evaluate(() => {
       window.moveTo(0, 0);
       window.resizeTo(window.screen.availWidth, window.screen.availHeight);
     });
 
-    await page.goto('https://srvqacgowb01.local.bsc.com:5000/requests/create/multiproduct', {
+    console.log(`[CE-EX][TRACE] antes de page.goto PORTAL_MULTIPRODUCT_URL`);
+    await page.goto(PORTAL_MULTIPRODUCT_URL, {
       waitUntil: 'domcontentloaded',
     });
+    console.log(`[CE-EX][TRACE] despues de page.goto url=${page.url()}`);
+    console.log(`[CE-EX][TRACE] antes de esperarPortalListoTrasLogin`);
     const estadoSesion = await esperarPortalListoTrasLogin(page, { timeoutMs: 240000 });
+    console.log(`[CE-EX][TRACE] despues de esperarPortalListoTrasLogin url=${page.url()}`);
     if (estadoSesion.loginDetectado) {
       console.log('Sesion reanudada despues de login manual.');
     } else {
@@ -1314,19 +1719,26 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
 
     const estaEnSolicitudMultiproducto = /\/requests\/create\/multiproduct/i.test(page.url());
     if (!estaEnSolicitudMultiproducto) {
-      const btnSolicitudMultiproducto = page
-        .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
-        .first();
+      const forzadoDirecto = await asegurarPortalEnMultiproducto(page, `Flujo][intento=${intento}`);
+      if (forzadoDirecto) {
+        console.log(`[Flujo][intento=${intento}] URL tras forzado directo: ${page.url()} | enMultiproducto=true`);
+      }
 
-      const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
-        .waitFor({ state: 'visible', timeout: 4000 })
-        .then(() => true)
-        .catch(() => false);
+      if (!/\/requests\/create\/multiproduct/i.test(page.url())) {
+        const btnSolicitudMultiproducto = page
+          .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
+          .first();
 
-      if (puedeAbrirSolicitudMultiproducto) {
-        await btnSolicitudMultiproducto.click({ force: true });
-        await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 60000 });
-        await page.waitForLoadState('domcontentloaded');
+        const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
+          .waitFor({ state: 'visible', timeout: 4000 })
+          .then(() => true)
+          .catch(() => false);
+
+        if (puedeAbrirSolicitudMultiproducto) {
+          await btnSolicitudMultiproducto.click({ force: true });
+          await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 60000 });
+          await page.waitForLoadState('domcontentloaded');
+        }
       }
     }
 
@@ -1338,10 +1750,15 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
     if (modalCancelarVisible) {
       const btnMantenerProceso = modalCancelarProceso.getByRole('button', { name: /^Cancelar$/i }).first();
       if (await btnMantenerProceso.isVisible().catch(() => false)) {
-        await btnMantenerProceso.click({ force: true });
+        await btnMantenerProceso.click({ force: true }).catch(() => { });
         await modalCancelarProceso.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => { });
       }
     }
+
+    // Validar que estamos en la pantalla correcta de Nueva Solicitud antes de llenar campos
+    console.log(`[CE-EX][TRACE] antes de asegurarPantallaNuevaSolicitudMultiproducto`);
+    await asegurarPantallaNuevaSolicitudMultiproducto(page, `inicio registro ${registro.identificacion}`);
+    console.log(`[CE-EX][TRACE] despues de asegurarPantallaNuevaSolicitudMultiproducto - formulario visible`);
 
     await clickReintentarListaSiVisible(page, 'Oficial');
     await clickReintentarListaSiVisible(page, 'Promotor');
@@ -1422,10 +1839,14 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
       }
     }
 
-    await page.getByRole('button', { name: 'Depurar' }).click({ noWaitAfter: true });
-    const spinnerDepurar = page.getByText(/Consultando datos del solicitante/i).first();
-    await spinnerDepurar.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
-    await spinnerDepurar.waitFor({ state: 'hidden', timeout: 120000 }).catch(() => { });
+    const btnDepurar = page.getByRole('button', { name: 'Depurar' }).first();
+    console.log(`[Depurar][Continuar] Click en Depurar realizado`);
+    await btnDepurar.click({ noWaitAfter: true });
+
+    console.log(`[Depurar][Continuar] Esperando fin de spinner/loading`);
+    await esperarFinConsultaSolicitante(page, 120000);
+    await esperarFinActualizandoSolicitud(page, 15000).catch(() => {});
+    console.log(`[Depurar][Continuar] Spinner/loading finalizado`);
 
     const mpnCasoActivo = await extraerCasoActivoMpn(page);
     if (mpnCasoActivo) {
@@ -1454,9 +1875,14 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
       await inputFechaExp2.dispatchEvent('change').catch(() => { });
       await inputFechaExp2.blur().catch(() => { });
 
-      await page.getByRole('button', { name: 'Depurar' }).click({ noWaitAfter: true });
-      await spinnerDepurar.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
-      await spinnerDepurar.waitFor({ state: 'hidden', timeout: 120000 }).catch(() => { });
+      const btnDepurar2 = page.getByRole('button', { name: 'Depurar' }).first();
+      console.log(`[Depurar][Continuar] Click en segundo Depurar realizado`);
+      await btnDepurar2.click({ noWaitAfter: true });
+
+      console.log(`[Depurar][Continuar] Esperando fin de spinner/loading (segundo depurar)`);
+      await esperarFinConsultaSolicitante(page, 120000);
+      await esperarFinActualizandoSolicitud(page, 15000).catch(() => {});
+      console.log(`[Depurar][Continuar] Spinner/loading finalizado (segundo depurar)`);
 
       const mpnCasoActivo2 = await extraerCasoActivoMpn(page);
       if (mpnCasoActivo2) {
@@ -1471,13 +1897,35 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
       }
     }
 
-    await page.waitForTimeout(3000);
-    await page.waitForTimeout(5000);
+    console.log(`[Depurar][Continuar] Esperando estabilización humana antes de Continuar`);
+    await page.waitForTimeout(2500);
+
+    const btnContinuar = getBotonContinuar(page);
+    const continuarVisible = await btnContinuar.isVisible({ timeout: 2000 }).catch(() => false);
+    const continuarEnabled = await btnContinuar.isEnabled({ timeout: 800 }).catch(() => true);
+
+    if (!continuarVisible || !continuarEnabled) {
+      console.log(`[Depurar][Continuar] WARN: Botón Continuar no está listo (visible=${continuarVisible}, enabled=${continuarEnabled}). Esperando...`);
+      await page.waitForTimeout(1500);
+    }
+
+    console.log(`[Depurar][Continuar] Botón Continuar visible y habilitado`);
     await asegurarTiempoEnVivienda(page, "0").catch(() => false);
-    await getBotonContinuar(page).click();
-    await esperarFinActualizandoSolicitud(page, 25000).catch(() => false);
+    console.log(`[Depurar][Continuar] Click en Continuar`);
+    await btnContinuar.click({ noWaitAfter: true }).catch(() => { });
+
+    // Guard: Verificar que la page no se cerró
+    console.log(`[CE-EX][PAGE] Verificando page después de Continuar`);
+    if (page.isClosed()) {
+      console.log(`[CE-EX][PAGE][CLOSED] Page cerrada después de Continuar`);
+      throw new Error('[CE-EX][PAGE][CLOSED] Page cerrada después de Continuar antes de selección de producto');
+    }
+    console.log(`[CE-EX][PAGE] Page activa después de Continuar url=${page.url()}`);
+
+    await page.waitForLoadState('domcontentloaded').catch(() => { });
+    await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
     await resolverNoPoseeCorreoSiFalta(page).catch(() => false);
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(1500);
     return;
   }
 
@@ -1485,6 +1933,12 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
 }
 
 async function etapaValidacionesPrevias(page: Page) {
+  // Guard: Verificar que la page no se cerró
+  if (page.isClosed()) {
+    console.log(`[CE-EX][PAGE][CLOSED] Page cerrada en etapaValidacionesPrevias`);
+    throw new Error('[CE-EX][PAGE][CLOSED] Page cerrada en etapaValidacionesPrevias');
+  }
+
   let hizoValidaciones = false;
   const hizoTiempoExclusion = await llenarFechaSiVisibleYVacia(page, "Tiempo de exclusion", "16-08-2030", { debug: true });
   if (hizoTiempoExclusion) hizoValidaciones = true;
@@ -1549,6 +2003,13 @@ async function etapaValidacionesPrevias(page: Page) {
 }
 
 async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
+  // Guard: Verificar que la page no se cerró
+  if (page.isClosed()) {
+    console.log(`[CE-EX][PAGE][CLOSED] Page cerrada en etapaSeccionProductos`);
+    throw new Error('[CE-EX][PAGE][CLOSED] Page cerrada en etapaSeccionProductos');
+  }
+
+  console.log(`[Producto][Seleccion] Esperando pantalla Productos`);
   let { seccionProductos } = await asegurarSeccionProductosVisible(page, {
     maxIntentos: 10,
     waitInicialMs: 90000,
@@ -1585,13 +2046,94 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
       const enPantallaPrevia = await estaEnPantallaPreProductos(currentPage).catch(() => false);
       const actualizandoVisible = await currentPage.getByText(/Actualizando solicitud/i).first().isVisible().catch(() => false);
       console.log(`[NAV-PRODUCTO] categoriaVisible=false url=${urlActual} paso3SinProducto=${enPaso3SinProducto} dropdownsVisibles=${dropdownsVisibles} prePantalla=${enPantallaPrevia} actualizando=${actualizandoVisible}`);
+
+      // Recovery: si hay dropdowns visibles pero categoría no está visible, intentar recuperación
+      if (dropdownsVisibles >= 2 && !enPantallaPrevia) {
+        console.log(`[Producto][Seleccion] RECOVERY: ${dropdownsVisibles} dropdowns detectados con categoría no visible. Intentando scroll/detección...`);
+        await capturarDiagnosticoDom(currentPage, 'ce_ex_producto_categoria_no_visible_before', [], {
+          motivo: 'recovery_categoria_no_visible',
+        });
+
+        // Intentar scroll a la sección de productos
+        try {
+          const labelCategoria = currentPage.getByText(/Categor[ií]a de producto/i).first();
+          const labelVisible = await labelCategoria.isVisible().catch(() => false);
+          if (!labelVisible) {
+            console.log(`[Producto][Seleccion] Label Categoría no visible; scrolling...`);
+            await currentPage.evaluate(() => {
+              const elementos = Array.from(document.querySelectorAll('*')).filter(
+                el => (el.textContent || '').toLowerCase().includes('categoría de producto')
+              );
+              if (elementos.length > 0) {
+                elementos[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }).catch(() => { });
+            await currentPage.waitForTimeout(800);
+          }
+        } catch (e) {
+          console.log(`[Producto][Seleccion] Error durante scroll recovery: ${String(e)}`);
+        }
+
+        await capturarDiagnosticoDom(currentPage, 'ce_ex_producto_categoria_no_visible_after', [], {
+          motivo: 'recovery_categoria_no_visible_after_scroll',
+        });
+
+        // Reintentar locate usando fallback
+        const seccionFallback = await localizarSeccionProductos(currentPage).catch(() => null);
+        if (seccionFallback) {
+          console.log(`[Producto][Seleccion] Fallback seccionProductos detectada después de scroll`);
+          return seccionFallback;
+        }
+      }
+
       return null;
     },
   });
 
+  console.log(`[Producto][Seleccion] Iniciando selección de categoría`);
   await seleccionarCategoriaEnSeccionProductos(page, seccionProductos);
+  console.log(`[Producto][Seleccion] Categoría seleccionada`);
+
   await seccionProductos.waitFor({ state: "visible", timeout: 10000 }).catch(() => { });
-  await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+
+  console.log(`[Producto][Seleccion] Iniciando selección de producto para tipoCuenta=${registro.tipoCuenta}`);
+  try {
+    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+    console.log(`[Producto][Seleccion] Producto seleccionado exitosamente`);
+  } catch (error) {
+    console.log(`[Producto][Seleccion] Error en selección: ${String(error)}`);
+
+    // Capture DOM diagnostic para debugging
+    const productoLabel = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+    if (!productoLabel) {
+      console.log(`[Producto][Seleccion] Producto label no visible; capturando diagnóstico`);
+      await capturarDiagnosticoDom(page, 'ce_ex_producto_producto_no_visible_error', [], {
+        motivo: 'seleccion_producto_fallo_no_visible',
+      });
+    }
+
+    // Reintentar con scroll y locate fallback
+    console.log(`[Producto][Seleccion] Intentando recovery: scroll + locate fallback`);
+    await page.evaluate(() => {
+      const elementos = Array.from(document.querySelectorAll('*')).filter(
+        el => (el.textContent || '').toLowerCase().includes('producto')
+      );
+      if (elementos.length > 0) {
+        elementos[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }).catch(() => { });
+    await page.waitForTimeout(600);
+
+    const seccionFallback = await localizarSeccionProductos(page).catch(() => null);
+    if (seccionFallback) {
+      console.log(`[Producto][Seleccion] Fallback section encontrada; reintentando selección`);
+      await seleccionarProductoEnSeccionProductos(page, seccionFallback, registro.tipoCuenta).catch(e => {
+        console.log(`[Producto][Seleccion] Reintento también falló: ${String(e)}`);
+      });
+    } else {
+      throw error;
+    }
+  }
 
   const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
   const confirmarProductoAgregado = async () => {
@@ -2036,7 +2578,11 @@ async function etapaEvidencias(page: Page, registro: RegistroExcel, capturasRef:
 }
 
 async function prepararSiguienteRegistro(page: Page) {
-  if (page.isClosed()) return;
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro INIT url=${page.url()}`);
+  if (page.isClosed()) {
+    console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - page is closed, returning`);
+    return;
+  }
 
   const cerroFinalizada = await cerrarModalSolicitudFinalizada(page, { timeoutMs: 1200 }).catch(() => false);
   if (!cerroFinalizada) {
@@ -2065,13 +2611,50 @@ async function prepararSiguienteRegistro(page: Page) {
     }
   }
 
-  await page.goto('https://srvqacgowb01.local.bsc.com:5000/requests/create/multiproduct', {
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - antes de page.goto`);
+  await page.goto(PORTAL_MULTIPRODUCT_URL, {
     waitUntil: 'domcontentloaded',
   }).catch(() => { });
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - despues de page.goto url=${page.url()}`);
+
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - antes de esperarPortalListoTrasLogin`);
   await esperarPortalListoTrasLogin(page, { timeoutMs: 120000 }).catch(() => ({ loginDetectado: false }));
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - despues de esperarPortalListoTrasLogin url=${page.url()}`);
+
+  const estaEnSolicitudMultiproducto = /\/requests\/create\/multiproduct/i.test(page.url());
+  if (!estaEnSolicitudMultiproducto) {
+    console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - no esta en multiproducto, llamando asegurarPortalEnMultiproducto`);
+    const forzadoDirecto = await asegurarPortalEnMultiproducto(page, `prepararSiguienteRegistro`);
+    if (forzadoDirecto) {
+      console.log(`[prepararSiguienteRegistro] URL tras forzado directo: ${page.url()} | enMultiproducto=true`);
+    }
+
+    if (!/\/requests\/create\/multiproduct/i.test(page.url())) {
+      const btnSolicitudMultiproducto = page
+        .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
+        .first();
+
+      const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
+        .waitFor({ state: 'visible', timeout: 4000 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (puedeAbrirSolicitudMultiproducto) {
+        await btnSolicitudMultiproducto.click({ force: true });
+        await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 60000 });
+        await page.waitForLoadState('domcontentloaded');
+      }
+    }
+  }
+
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - antes de asegurarPantallaNuevaSolicitudMultiproducto`);
+  await asegurarPantallaNuevaSolicitudMultiproducto(page, 'siguiente_registro').catch((e) => {
+    console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - ERROR en asegurarPantallaNuevaSolicitudMultiproducto: ${String(e)}`);
+    console.log(`[NuevaSolicitud][Recovery] Fallo en prepararSiguienteRegistro: ${String(e)}`);
+    throw e;
+  });
+  console.log(`[CE-EX][TRACE] prepararSiguienteRegistro - despues de asegurarPantallaNuevaSolicitudMultiproducto - EXITO`);
 }
-
-
 
 test('Cuenta Efectivo Cliente existente - desde Excel', async () => {
   const session = await launchPortalSession({ defaultContinueOnError: true });
