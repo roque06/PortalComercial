@@ -3068,6 +3068,61 @@ async function esperarCertificadoListoDespuesDepurar(page: Page) {
     throw new Error('[CERT-EX][CRITICO] Timeout esperando estabilidad después de Depurar');
 }
 
+async function esperarUrlRequestEditEstableCert(page: Page, contexto: string) {
+    const timeoutMs = 120000;
+    const inicio = Date.now();
+    let estableConsecutivo = 0;
+
+    while (Date.now() - inicio < timeoutMs) {
+        const url = page.url();
+
+        const enCreate = /\/requests\/create\/multiproduct/i.test(url);
+        const enEdit = /\/requests\/\d+\/edit/i.test(url);
+
+        const actualizando = await page.getByText(/Actualizando solicitud/i).first().isVisible().catch(() => false);
+        const depurando = await page.getByText(/Depurando solicitante|Consultando datos del solicitante/i).first().isVisible().catch(() => false);
+        const obteniendoCert = await page.getByText(/Obteniendo datos de certificado/i).first().isVisible().catch(() => false);
+
+        const modalCancelar = await page.locator('.p-dialog:visible, [role="dialog"]:visible')
+            .filter({ hasText: /Cancelar proceso de solicitud/i })
+            .first()
+            .isVisible()
+            .catch(() => false);
+
+        const requestId0 = await page.getByText(/La entidad Request con el Id\.?\s*0 no existe|Error al crear cliente/i)
+            .first()
+            .isVisible()
+            .catch(() => false);
+
+        console.log(`[CERT-EX][WaitRequestEdit] contexto=${contexto} url=${url} enCreate=${enCreate} enEdit=${enEdit} actualizando=${actualizando} depurando=${depurando} obteniendoCert=${obteniendoCert} modalCancelar=${modalCancelar} requestId0=${requestId0}`);
+
+        if (requestId0) {
+            await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => {});
+            throw new Error('[CERT-EX][CRITICO] Request Id 0 detectado durante espera de request edit estable');
+        }
+
+        if (modalCancelar) {
+            throw new Error('[CERT-EX][CRITICO] Modal Cancelar proceso de solicitud apareció durante espera; no se cierra automáticamente');
+        }
+
+        if (enEdit && !enCreate && !actualizando && !depurando && !obteniendoCert) {
+            estableConsecutivo += 1;
+        } else {
+            estableConsecutivo = 0;
+        }
+
+        if (estableConsecutivo >= 5) {
+            console.log(`[CERT-EX][WaitRequestEdit] Request edit estable contexto=${contexto}`);
+            return;
+        }
+
+        await page.waitForTimeout(700);
+    }
+
+    await page.screenshot({ path: `artifacts/cert_ex_timeout_request_edit_${Date.now()}.png`, fullPage: true }).catch(() => {});
+    throw new Error(`[CERT-EX][CRITICO] Timeout esperando request edit estable contexto=${contexto}`);
+}
+
 async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
     const maxIntentosCasoActivo = 2;
 
@@ -3286,8 +3341,8 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
 
         console.log(`[CERT-EX][Depurar][Continuar] Botón Continuar visible y habilitado`);
 
-        // Tercera validación justo antes del click
-        await esperarCertificadoListoDespuesDepurar(page);
+        // Validar URL /requests/{id}/edit estable ANTES de hacer click
+        await esperarUrlRequestEditEstableCert(page, 'justo antes click Continuar post Depurar');
 
         await asegurarTiempoEnVivienda(page, "0").catch(() => false);
         console.log(`[CERT-EX][Depurar][Continuar] Click en Continuar`);
@@ -3301,7 +3356,12 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
         }
         console.log(`[CERT-EX][PAGE] Page activa después de Continuar url=${page.url()}`);
 
+        // Esperar a que la página se estabilice después del click
         await page.waitForLoadState('domcontentloaded').catch(() => { });
+        await page.waitForTimeout(1500);
+        await esperarCertificadoListoDespuesDepurar(page);
+        console.log('[CERT-EX][Depurar][Continuar] Post-click Continuar estable');
+
         await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
         await resolverNoPoseeCorreoSiFalta(page).catch(() => false);
         await page.waitForTimeout(1500);
@@ -4197,7 +4257,10 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         console.log('[CERT-EX][Producto][Avance] productoAgregadoEnFlujo=true');
 
         // === FASE 5: CONTINUAR FLUJO NORMAL CON BOTÓN CONTINUAR/SIGUIENTE ===
-        console.log('[CERT-EX][Producto][Avance] Buscando botón Continuar');
+        console.log('[CERT-EX][Producto][Avance] Esperando estabilidad antes de Continuar');
+        await esperarUrlRequestEditEstableCert(page, 'después de cerrar modal certificado');
+
+        console.log('[CERT-EX][Producto][Avance] URL estable antes de Continuar');
         const btnContinuar = page
             .getByRole('button', { name: /^Continuar$|^Siguiente$|^Siguiente paso$/i })
             .first();
@@ -4206,7 +4269,10 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         if (btnContinuarVisible) {
             console.log('[CERT-EX][Producto][Avance] Click en Continuar');
             await btnContinuar.click().catch(() => {});
-            await page.waitForTimeout(1000);
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            await page.waitForTimeout(1500);
+            console.log('[CERT-EX][Producto][Avance] Post-click Continuar, esperando estabilidad');
+            await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
             console.log('[CERT-EX][Producto][Avance] Continuando flujo normal');
         } else {
             console.log('[CERT-EX][Producto][Avance] Botón Continuar no visible');
