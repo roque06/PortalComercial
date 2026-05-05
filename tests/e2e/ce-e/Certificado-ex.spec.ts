@@ -1543,14 +1543,39 @@ async function cerrarModalCancelarProcesoSiVisible(page: Page) {
 }
 
 async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
-    const inicio = Date.now();
+    const EARLY_EXIT_CHECK_MS = 1500; // Verificar tempranamente si el texto aparece
+
     const txtActualizando = page.getByText(/Actualizando solicitud/i).first();
     const txtDepurando = page.getByText(/Depurando solicitante|Consultando datos del solicitante/i).first();
     const overlays = page.locator(
         '.p-blockui:visible, [data-pc-name="blockui"]:visible, .p-progressspinner:visible, .p-progress-spinner:visible, [role="progressbar"]:visible'
     );
 
-    while (Date.now() - inicio < timeoutMs) {
+    // Early exit check: si "Actualizando solicitud" no aparece en los primeros 1500ms, salir inmediatamente
+    const earlyCheckStart = Date.now();
+    while (Date.now() - earlyCheckStart < EARLY_EXIT_CHECK_MS) {
+        const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
+        const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
+        const overlayCount = await overlays.count().catch(() => 0);
+
+        if (actualizandoVisible || depurandoVisible || overlayCount > 0) {
+            // El spinner/actualizando SÍ apareció, esperar a que desaparezca
+            console.log('[CERT-EX][Depurar][Continuar] Actualizando solicitud detectado; esperando fin');
+            break;
+        }
+
+        if (Date.now() - earlyCheckStart >= EARLY_EXIT_CHECK_MS) {
+            // El spinner nunca apareció, salir inmediatamente sin esperar timeout completo
+            console.log('[CERT-EX][Depurar][Continuar] Actualizando solicitud no detectado en 1500ms; continuando');
+            return true;
+        }
+
+        await page.waitForTimeout(100);
+    }
+
+    // Si llegamos aquí, el spinner SÍ apareció. Esperar a que desaparezca.
+    const mainWaitStart = Date.now();
+    while (Date.now() - mainWaitStart < timeoutMs) {
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
         const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
@@ -3075,12 +3100,13 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             }
         }
 
-        console.log(`[Flujo][intento=${intento}] haciendo click en Depurar...`);
-        await page.getByRole('button', { name: 'Depurar' }).click({ noWaitAfter: true });
-        const spinnerDepurar = page.getByText(/Consultando datos del solicitante/i).first();
-        await spinnerDepurar.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
-        await spinnerDepurar.waitFor({ state: 'hidden', timeout: 120000 }).catch(() => { });
-        console.log(`[Flujo][intento=${intento}] Depurar completado`);
+        console.log(`[CERT-EX][Depurar][Continuar] Click en Depurar realizado`);
+        const btnDepurar = page.getByRole('button', { name: 'Depurar' }).first();
+        await btnDepurar.click({ noWaitAfter: true });
+
+        console.log(`[CERT-EX][Depurar][Continuar] Esperando fin de spinner/loading`);
+        await esperarFinActualizandoSolicitud(page, 15000).catch(() => { });
+        console.log(`[CERT-EX][Depurar][Continuar] Spinner/loading finalizado`);
 
         const mpnCasoActivo = await extraerCasoActivoMpn(page);
         if (mpnCasoActivo) {
@@ -3113,9 +3139,13 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             await inputFechaExp2.dispatchEvent('change').catch(() => { });
             await inputFechaExp2.blur().catch(() => { });
 
-            await page.getByRole('button', { name: 'Depurar' }).click({ noWaitAfter: true });
-            await spinnerDepurar.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
-            await spinnerDepurar.waitFor({ state: 'hidden', timeout: 120000 }).catch(() => { });
+            console.log(`[CERT-EX][Depurar][Continuar] Click en segundo Depurar realizado`);
+            const btnDepurar2 = page.getByRole('button', { name: 'Depurar' }).first();
+            await btnDepurar2.click({ noWaitAfter: true });
+
+            console.log(`[CERT-EX][Depurar][Continuar] Esperando fin de spinner/loading (segundo depurar)`);
+            await esperarFinActualizandoSolicitud(page, 15000).catch(() => { });
+            console.log(`[CERT-EX][Depurar][Continuar] Spinner/loading finalizado (segundo depurar)`);
 
             const mpnCasoActivo2 = await extraerCasoActivoMpn(page);
             if (mpnCasoActivo2) {
@@ -3134,13 +3164,35 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             }
         }
 
-        await page.waitForTimeout(3000);
-        await page.waitForTimeout(5000);
+        console.log(`[CERT-EX][Depurar][Continuar] Esperando estabilización humana antes de Continuar`);
+        await page.waitForTimeout(2500);
+
+        const btnContinuar = getBotonContinuar(page);
+        const continuarVisible = await btnContinuar.isVisible({ timeout: 2000 }).catch(() => false);
+        const continuarEnabled = await btnContinuar.isEnabled({ timeout: 800 }).catch(() => true);
+
+        if (!continuarVisible || !continuarEnabled) {
+            console.log(`[CERT-EX][Depurar][Continuar] WARN: Botón Continuar no está listo (visible=${continuarVisible}, enabled=${continuarEnabled}). Esperando...`);
+            await page.waitForTimeout(1500);
+        }
+
+        console.log(`[CERT-EX][Depurar][Continuar] Botón Continuar visible y habilitado`);
         await asegurarTiempoEnVivienda(page, "0").catch(() => false);
-        await getBotonContinuar(page).click();
-        await esperarFinActualizandoSolicitud(page, 25000).catch(() => false);
+        console.log(`[CERT-EX][Depurar][Continuar] Click en Continuar`);
+        await btnContinuar.click({ noWaitAfter: true }).catch(() => { });
+
+        // Guard: Verificar que la page no se cerró
+        console.log(`[CERT-EX][PAGE] Verificando page después de Continuar`);
+        if (page.isClosed()) {
+            console.log(`[CERT-EX][PAGE][CLOSED] Page cerrada después de Continuar`);
+            throw new Error('[CERT-EX][PAGE][CLOSED] Page cerrada después de Continuar');
+        }
+        console.log(`[CERT-EX][PAGE] Page activa después de Continuar url=${page.url()}`);
+
+        await page.waitForLoadState('domcontentloaded').catch(() => { });
+        await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
         await resolverNoPoseeCorreoSiFalta(page).catch(() => false);
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(1500);
         return;
     }
 
