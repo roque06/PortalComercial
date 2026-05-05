@@ -2966,6 +2966,59 @@ async function asegurarPortalEnMultiproducto(page: Page, contexto: string) {
     return await enMultiproducto();
 }
 
+async function esperarCertificadoListoDespuesDepurar(page: Page) {
+    const timeoutMs = 120000;
+    const inicio = Date.now();
+    let estableConsecutivo = 0;
+
+    while (Date.now() - inicio < timeoutMs) {
+        const actualizando = await page.getByText(/Actualizando solicitud/i).first().isVisible().catch(() => false);
+        const depurando = await page.getByText(/Depurando solicitante|Consultando datos del solicitante/i).first().isVisible().catch(() => false);
+        const modalCancelar = await page
+            .locator('.p-dialog:visible, [role="dialog"]:visible')
+            .filter({ hasText: /Cancelar proceso de solicitud/i })
+            .first()
+            .isVisible()
+            .catch(() => false);
+
+        const toastRequest0 = await page
+            .getByText(/La entidad Request con el Id\.?\s*0 no existe|Error al crear cliente/i)
+            .first()
+            .isVisible()
+            .catch(() => false);
+
+        console.log(`[CERT-EX][Depurar][Continuar] espera actualizando=${actualizando} depurando=${depurando} modalCancelar=${modalCancelar} toastRequest0=${toastRequest0}`);
+
+        if (toastRequest0) {
+            await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => { });
+            throw new Error('[CERT-EX][CRITICO] Apareció Request Id 0 antes de Continuar; la web no estaba lista');
+        }
+
+        if (modalCancelar) {
+            // NO hacer click en Cancelar. Solo esperar a que desaparezca.
+            estableConsecutivo = 0;
+            await page.waitForTimeout(500);
+            continue;
+        }
+
+        if (!actualizando && !depurando) {
+            estableConsecutivo += 1;
+        } else {
+            estableConsecutivo = 0;
+        }
+
+        if (estableConsecutivo >= 4) {
+            console.log('[CERT-EX][Depurar][Continuar] Pantalla estable tras Depurar');
+            return;
+        }
+
+        await page.waitForTimeout(500);
+    }
+
+    await page.screenshot({ path: `artifacts/cert_ex_timeout_post_depurar_${Date.now()}.png`, fullPage: true }).catch(() => { });
+    throw new Error('[CERT-EX][CRITICO] Timeout esperando estabilidad después de Depurar');
+}
+
 async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
     const maxIntentosCasoActivo = 2;
 
@@ -3164,8 +3217,14 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             }
         }
 
+        // Espera específica de Certificado-ex: NO continuar mientras exista spinner/modal/toast
+        await esperarCertificadoListoDespuesDepurar(page);
+
         console.log(`[CERT-EX][Depurar][Continuar] Esperando estabilización humana antes de Continuar`);
         await page.waitForTimeout(2500);
+
+        // Segunda validación: esperar de nuevo que la página esté estable
+        await esperarCertificadoListoDespuesDepurar(page);
 
         const btnContinuar = getBotonContinuar(page);
         const continuarVisible = await btnContinuar.isVisible({ timeout: 2000 }).catch(() => false);
@@ -3177,6 +3236,10 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
         }
 
         console.log(`[CERT-EX][Depurar][Continuar] Botón Continuar visible y habilitado`);
+
+        // Tercera validación justo antes del click
+        await esperarCertificadoListoDespuesDepurar(page);
+
         await asegurarTiempoEnVivienda(page, "0").catch(() => false);
         console.log(`[CERT-EX][Depurar][Continuar] Click en Continuar`);
         await btnContinuar.click({ noWaitAfter: true }).catch(() => { });
