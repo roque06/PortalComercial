@@ -212,64 +212,198 @@ export async function agregarRelacionadoSiAplica(
     .first();
   await modalAsociar.waitFor({ state: "visible", timeout: 15000 });
 
-  const btnAnadir = modalAsociar.getByRole("button", { name: /^A[ñn]adir$/i }).first();
-  await btnAnadir.waitFor({ state: "visible", timeout: 15000 });
+  // Paso crítico: Click en botón "Añadir" de la fila del producto para revelar campos
+  const btnAnadirFilaProducto = modalAsociar
+    .getByRole('button', { name: /^A[ñn]adir$/i })
+    .first();
+  const btnAnadirVisible = await btnAnadirFilaProducto.isVisible({ timeout: 5000 }).catch(() => false);
+  if (btnAnadirVisible) {
+    console.log(`[Relacionados][Asociacion] Click en Añadir de fila producto para revelar campos`);
+    await btnAnadirFilaProducto.scrollIntoViewIfNeeded().catch(() => { });
+    await btnAnadirFilaProducto.click({ force: true });
+    await page.waitForTimeout(800);
+  }
+
+  // Esperar a que aparezcan los campos Tipo de relacionado y Tipo de relación
+  const campoBuscadorTipoRelacionado = modalAsociar.getByText(/^Tipo de relacionado$/i).first();
+  await campoBuscadorTipoRelacionado.waitFor({ state: 'visible', timeout: 10000 }).catch(() => { });
+  console.log(`[Relacionados][Asociacion] Campos Tipo de relacionado / Tipo de relación visibles`);
+
   const rxTipoRelacionado = /^Tipo de relacionado$/i;
   const rxTipoRelacion = /^Tipo de relaci(?:ó|o)n$/i;
 
-  const camposRelacionVisible = async () => {
-    const tipoRelacionadoVisible = await modalAsociar
-      .locator("label")
-      .filter({ hasText: rxTipoRelacionado })
-      .first()
-      .isVisible()
-      .catch(() => false);
-    const tipoRelacionadoTextVisible = await modalAsociar.getByText(rxTipoRelacionado).first().isVisible().catch(() => false);
-    const tipoRelacionVisible = await modalAsociar
-      .locator("label")
-      .filter({ hasText: rxTipoRelacion })
-      .first()
-      .isVisible()
-      .catch(() => false);
-    const tipoRelacionTextVisible = await modalAsociar.getByText(rxTipoRelacion).first().isVisible().catch(() => false);
-    return (tipoRelacionadoVisible || tipoRelacionadoTextVisible) && (tipoRelacionVisible || tipoRelacionTextVisible);
-  };
-
-  let formularioRelacionListo = await camposRelacionVisible();
-  for (let i = 1; i <= 6 && !formularioRelacionListo; i++) {
-    await btnAnadir.scrollIntoViewIfNeeded().catch(() => { });
-    await btnAnadir.click({ force: true }).catch(() => { });
-    await page.waitForTimeout(1000);
-    formularioRelacionListo = await camposRelacionVisible();
-  }
-  if (!formularioRelacionListo) {
-    throw new Error("[CRITICO] No aparecieron los campos 'Tipo de relacionado/Tipo de relación' tras pulsar 'Añadir'.");
-  }
+  console.log(`[Relacionados][Asociacion] Click final en Aceptar queda bloqueado hasta validar campos`);
 
   await seleccionarDropdownIndexEnModal(modalAsociar, rxTipoRelacionado, 0);
 
-  let tipoRelacionSeleccionado = false;
-  for (let i = 1; i <= 5; i++) {
-    await clickReintentarPorLabelEnModal(modalAsociar, rxTipoRelacion).catch(() => { });
-    const ok = await seleccionarDropdownIndexEnModal(modalAsociar, rxTipoRelacion, 0, 10000)
-      .then(() => true)
-      .catch(() => false);
-    if (ok) {
-      tipoRelacionSeleccionado = true;
-      break;
+  const dropdownTipoRelacionado = modalAsociar.locator('div.p-dropdown, [data-pc-name="dropdown"]').first();
+  const tipoRelacionadoDropdownId = await dropdownTipoRelacionado.getAttribute('id').catch(() => '');
+  console.log(`[Relacionados][Asociacion] Tipo relacionado dropdown id=${tipoRelacionadoDropdownId}`);
+
+  console.log(`[Relacionados][Asociacion] NO se pulsa Añadir antes de validar Tipo de relación`);
+
+  const encontrarDropdownTipoRelacion = async (modal: import("@playwright/test").Locator, idExcluir: string) => {
+    console.log(`[Relacionados][Asociacion] Buscando inputgroup de Tipo de relación`);
+    const inputgroups = await modal.locator('div.p-inputgroup:visible').all();
+
+    for (const ig of inputgroups) {
+      const btnRetry = ig.locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button.p-button-warning').first();
+      const tieneReintentar = await btnRetry.isVisible().catch(() => false);
+      console.log(`[Relacionados][Asociacion] Reintentar visible para Tipo de relación=${tieneReintentar}`);
+
+      if (tieneReintentar) {
+        console.log(`[Relacionados][Asociacion] Click Reintentar Tipo de relación`);
+        await btnRetry.click({ force: true });
+        await page.waitForTimeout(1200);
+
+        const dropdowns = await modal.locator('div.p-dropdown:visible').all();
+        console.log(`[Relacionados][Asociacion] Dropdowns visibles post-retry=${dropdowns.length}`);
+
+        const idsVistos = new Set<string>();
+        for (const dd of dropdowns) {
+          const id = await dd.getAttribute('id').catch(() => '');
+          if (idsVistos.has(id)) continue;
+          idsVistos.add(id);
+
+          if (id === idExcluir) {
+            console.log(`[Relacionados][Asociacion] Excluyendo dropdown Tipo relacionado id=${id}`);
+            continue;
+          }
+
+          console.log(`[Relacionados][Asociacion] Dropdown Tipo de relación id=${id}`);
+          return dd;
+        }
+
+        console.log(`[Relacionados][Asociacion] No se encontró dropdown de Tipo de relación después de retry`);
+        return null;
+      }
     }
-    await page.waitForTimeout(700);
+
+    console.log(`[Relacionados][Asociacion] No hay inputgroup con Reintentar, buscando dropdowns`);
+    const dropdowns = await modal.locator('div.p-dropdown:visible').all();
+    console.log(`[Relacionados][Asociacion] Dropdowns visibles=${dropdowns.length}`);
+
+    const idsVistos = new Set<string>();
+    for (const dd of dropdowns) {
+      const id = await dd.getAttribute('id').catch(() => '');
+      if (idsVistos.has(id)) continue;
+      idsVistos.add(id);
+
+      if (id === idExcluir) {
+        console.log(`[Relacionados][Asociacion] Excluyendo dropdown Tipo relacionado id=${id}`);
+        continue;
+      }
+
+      console.log(`[Relacionados][Asociacion] Dropdown Tipo de relación id=${id}`);
+      return dd;
+    }
+
+    return null;
+  };
+
+  let tipoRelacionSeleccionado = false;
+  let valorTipoRelacion = '';
+
+  for (let intentoTipoRelacion = 1; intentoTipoRelacion <= 3 && !tipoRelacionSeleccionado; intentoTipoRelacion++) {
+    console.log(`[Relacionados][Asociacion] Intento Tipo de relación ${intentoTipoRelacion}/3`);
+
+    const modalActual = page.locator('.p-dialog:visible, [role="dialog"]:visible').filter({ hasText: /A[ñn]adir relacionado/i }).first();
+    const modalVisible = await modalActual.isVisible().catch(() => false);
+    if (!modalVisible) {
+      throw new Error('[RELACIONADOS][CRITICO] Modal de asociación no visible');
+    }
+
+    const dropdownTipoRelacion = await encontrarDropdownTipoRelacion(modalActual, tipoRelacionadoDropdownId);
+    if (!dropdownTipoRelacion) {
+      console.log(`[Relacionados][Asociacion] No se encontró dropdown de Tipo de relación, esperando 1200ms`);
+      await page.waitForTimeout(1200);
+      continue;
+    }
+
+    const dropdownId = await dropdownTipoRelacion.getAttribute('id').catch(() => '');
+    if (dropdownId === tipoRelacionadoDropdownId) {
+      throw new Error('[RELACIONADOS][CRITICO] Tipo de relación resolvió al mismo dropdown de Tipo relacionado');
+    }
+
+    console.log(`[Relacionados][Asociacion] Abriendo dropdown Tipo de relación id=${dropdownId}`);
+    await dropdownTipoRelacion.click({ force: true });
+    await page.waitForTimeout(500);
+
+    const opciones = page.locator('[role="option"]:visible, .p-dropdown-item:visible');
+    const totalOpciones = await opciones.count().catch(() => 0);
+    console.log(`[Relacionados][Asociacion] Opciones en panel=${totalOpciones}`);
+
+    if (totalOpciones === 0) {
+      console.log(`[Relacionados][Asociacion] Sin opciones, reintentando`);
+      await page.waitForTimeout(1200);
+      continue;
+    }
+
+    const primeraOpcion = opciones.first();
+    const textoOpcion = (await primeraOpcion.textContent().catch(() => '') || '').trim();
+    const ariaLabelOpcion = (await primeraOpcion.getAttribute('aria-label').catch(() => '') || '').trim();
+
+    console.log(`[Relacionados][Asociacion] Primera opción: text="${textoOpcion}" ariaLabel="${ariaLabelOpcion}"`);
+
+    const valorInvalido = ['mancomunado', 'apoderado', 'seleccione', 'reintentar'].some(
+      v => textoOpcion.toLowerCase().includes(v) || ariaLabelOpcion.toLowerCase().includes(v)
+    );
+
+    if (valorInvalido) {
+      throw new Error(`[RELACIONADOS][CRITICO] Primera opción inválida: "${textoOpcion || ariaLabelOpcion}". Control es incorrecto.`);
+    }
+
+    console.log(`[Relacionados][Asociacion] Seleccionando opción index=0 para Tipo de relación`);
+    await primeraOpcion.click({ force: true });
+    await page.waitForTimeout(400);
+
+    const valorSeleccionado = await dropdownTipoRelacion.locator('.p-dropdown-label, [data-pc-section="label"]').textContent().catch(() => '');
+    console.log(`[Relacionados][Asociacion] Tipo de relación seleccionado correctamente: ${valorSeleccionado}`);
+
+    if (!valorSeleccionado.trim() || valorSeleccionado.toLowerCase().includes('seleccione')) {
+      console.log(`[Relacionados][Asociacion] Valor vacío o Seleccione, reintentando`);
+      await page.waitForTimeout(1200);
+      continue;
+    }
+
+    const valorInvalidoFinal = ['mancomunado', 'apoderado'].some(
+      v => valorSeleccionado.toLowerCase().includes(v)
+    );
+    if (valorInvalidoFinal) {
+      throw new Error(`[RELACIONADOS][CRITICO] Tipo de relación quedó en valor inválido: "${valorSeleccionado}"`);
+    }
+
+    console.log(`[Relacionados][Asociacion] Campos requeridos validados`);
+    const esRequerido = modalActual.getByText(/Es requerido/i).first();
+    const requiereVisible = await esRequerido.isVisible().catch(() => false);
+    if (requiereVisible) {
+      throw new Error('[RELACIONADOS][CRITICO] Campo Tipo de relación tiene mensaje de requerido');
+    }
+
+    const tieneReintentarFinal = await modalActual.locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar")').first().isVisible().catch(() => false);
+    if (tieneReintentarFinal) {
+      console.log(`[Relacionados][Asociacion] Todavía hay Reintentar, reintentando`);
+      await page.waitForTimeout(1200);
+      continue;
+    }
+
+    tipoRelacionSeleccionado = true;
+    valorTipoRelacion = valorSeleccionado;
   }
+
   if (!tipoRelacionSeleccionado) {
-    throw new Error("[CRITICO] No se pudo seleccionar 'Tipo de relación' para el relacionado.");
+    throw new Error('[RELACIONADOS][CRITICO] No se pudo seleccionar Tipo de relación después de 3 intentos');
   }
+
+  console.log(`[Relacionados][Asociacion] Tipo de relación validado: ${valorTipoRelacion}`);
+  console.log(`[Relacionados][Asociacion] Todas las validaciones pasaron; proceeding to click Aceptar`);
 
   const btnAceptarAsociacion = modalAsociar
     .locator('button.p-confirm-dialog-accept, button:has-text("Aceptar"), button[data-pc-name="acceptbutton"]')
     .last();
-  await btnAceptarAsociacion.waitFor({ state: "visible", timeout: 15000 });
+  await btnAceptarAsociacion.waitFor({ state: 'visible', timeout: 15000 });
   await btnAceptarAsociacion.click({ force: true });
-  await modalAsociar.waitFor({ state: "hidden", timeout: 15000 }).catch(() => { });
+  await modalAsociar.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => { });
 
   return true;
 }
