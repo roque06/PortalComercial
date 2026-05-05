@@ -3618,6 +3618,18 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
     const url = page.url();
     console.log(`[SeccionProductos] inicio url=${url}`);
 
+    // Validar contexto de entrada
+    console.log('[CERT-EX][FLOW] Antes de etapaSeccionProductos url=' + url);
+    console.log('[CERT-EX][FLOW] registro.productoAgregadoEnFlujo=' + Boolean((registro as any).productoAgregadoEnFlujo));
+    console.log('[CERT-EX][FLOW] registro.certificadoAgregadoEnFlujo=' + Boolean((registro as any).certificadoAgregadoEnFlujo));
+    console.log('[CERT-EX][FLOW] registro.tasaExcepcionProcesada=' + Boolean((registro as any).tasaExcepcionProcesada));
+
+    // Si el certificado ya fue agregado, omitir esta etapa duplicada
+    if ((registro as any).certificadoAgregadoEnFlujo || (registro as any).productoAgregadoEnFlujo) {
+        console.log('[CERT-EX][Producto][Avance] Certificado ya agregado; omitiendo etapaSeccionProductos duplicada');
+        return;
+    }
+
     // === GUARDS: Validar estado antes de Productos ===
     console.log('[CERT-EX][Guard] Validando estado antes de Productos');
 
@@ -4178,6 +4190,12 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         await page.waitForTimeout(1200);
         console.log('[CERT-EX][Certificados][Modal] Certificado agregado correctamente');
 
+        // Marcar que el certificado fue agregado exitosamente en el flujo
+        (registro as any).certificadoAgregadoEnFlujo = true;
+        (registro as any).productoAgregadoEnFlujo = true;
+        console.log('[CERT-EX][Producto][Avance] certificadoAgregadoEnFlujo=true');
+        console.log('[CERT-EX][Producto][Avance] productoAgregadoEnFlujo=true');
+
         // === FASE 5: CONTINUAR FLUJO NORMAL CON BOTÓN CONTINUAR/SIGUIENTE ===
         console.log('[CERT-EX][Producto][Avance] Buscando botón Continuar');
         const btnContinuar = page
@@ -4624,6 +4642,12 @@ async function etapaEvidencias(page: Page, registro: RegistroExcel, capturasRef:
 async function prepararSiguienteRegistro(page: Page) {
     if (page.isClosed()) return;
 
+    // Si PW_KEEP_BROWSER_ON_FAIL=1, no navegar ni resetear contexto para preservar diagnóstico
+    if (process.env.PW_KEEP_BROWSER_ON_FAIL === '1') {
+        console.log('[Cleanup] PW_KEEP_BROWSER_ON_FAIL=1; no navego ni cierro contexto');
+        return;
+    }
+
     const cerroFinalizada = await cerrarModalSolicitudFinalizada(page, { timeoutMs: 1200 }).catch(() => false);
     if (!cerroFinalizada) {
         const modalFinalizada = page
@@ -4687,7 +4711,9 @@ test('Certificados de Deposito Cliente existente - desde Excel', async () => {  
                 await etapaValidacionesPrevias(page);
 
                 // ===== INICIO: Seccion de productos =====
+                console.log('[CERT-EX][FLOW] Llamando a etapaSeccionProductos...');
                 await etapaSeccionProductos(context, page, registro);
+                console.log('[CERT-EX][FLOW] etapaSeccionProductos completada');
 
                 await procesarAprobacionExcepcionTasaSiAplica(context, page, registro);
 
