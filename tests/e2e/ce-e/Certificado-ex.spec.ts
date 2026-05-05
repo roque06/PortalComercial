@@ -440,14 +440,17 @@ async function esperarInteresRecalculado(
 async function solicitarTasaExcepcion(
     page: Page,
     inputTasa: Locator,
-    inputInteres: Locator,
+    inputInteres: Locator | null,
     valorTasaExcel: string
 ) {
     const valorInicialTasa = (await inputTasa.inputValue().catch(() => "")).trim();
-    const valorInteresAntes = (await inputInteres.inputValue().catch(() => "")).trim();
+    let valorInteresAntes = '';
+    if (inputInteres) {
+        valorInteresAntes = (await inputInteres.inputValue().catch(() => "")).trim();
+    }
 
     console.log(`[TasaExcepcion] valor inicial tasa='${valorInicialTasa}'`);
-    console.log(`[TasaExcepcion] interes antes='${valorInteresAntes}'`);
+    console.log(`[TasaExcepcion] interes antes='${valorInteresAntes || '[no disponible]'}'`);
 
     const leerTasa = async () => (await inputTasa.inputValue().catch(() => "")).trim();
     const esperarTasaCoincida = async (timeoutMs = 1500) => {
@@ -463,6 +466,9 @@ async function solicitarTasaExcepcion(
 
     let tasaCambiada = false;
 
+    console.log(`[CERT-EX][TasaExcepcion] Tasa Excel=${valorTasaExcel}`);
+    console.log(`[CERT-EX][TasaExcepcion] Modificando Tasa a ${valorTasaExcel}`);
+
     // intento 1
     await inputTasa.scrollIntoViewIfNeeded().catch(() => { });
     await inputTasa.click({ force: true }).catch(() => { });
@@ -473,7 +479,7 @@ async function solicitarTasaExcepcion(
     });
     await inputTasa.press("Tab").catch(() => { });
     let check = await esperarTasaCoincida(1600);
-    console.log(`[TasaExcepcion] intento 1 -> tasa='${check.valor}'`);
+    console.log(`[CERT-EX][TasaExcepcion] intento 1 -> tasa='${check.valor}'`);
     tasaCambiada = check.ok;
 
     // intento 2
@@ -483,7 +489,7 @@ async function solicitarTasaExcepcion(
         await inputTasa.pressSequentially(valorTasaExcel, { delay: 80 }).catch(() => { });
         await inputTasa.press("Tab").catch(() => { });
         check = await esperarTasaCoincida(1800);
-        console.log(`[TasaExcepcion] intento 2 -> tasa='${check.valor}'`);
+        console.log(`[CERT-EX][TasaExcepcion] intento 2 -> tasa='${check.valor}'`);
         tasaCambiada = check.ok;
     }
 
@@ -498,7 +504,7 @@ async function solicitarTasaExcepcion(
         }, valorTasaExcel).catch(() => { });
         await inputTasa.press("Tab").catch(() => { });
         check = await esperarTasaCoincida(1800);
-        console.log(`[TasaExcepcion] intento 3 -> tasa='${check.valor}'`);
+        console.log(`[CERT-EX][TasaExcepcion] intento 3 -> tasa='${check.valor}'`);
         tasaCambiada = check.ok;
     }
 
@@ -508,6 +514,7 @@ async function solicitarTasaExcepcion(
             `[CRITICO] No se pudo cambiar la Tasa para excepciÃ³n. valorInicial='${valorInicialTasa}' valorFinal='${tasaFinal}'`
         );
     }
+    console.log(`[CERT-EX][TasaExcepcion] Tasa modificada a ${valorTasaExcel}`);
 
     const modalConfirm = page
         .locator('.p-dialog:visible, [role="dialog"]:visible')
@@ -519,7 +526,7 @@ async function solicitarTasaExcepcion(
     let confirmVisible = false;
     for (let i = 1; i <= 4; i++) {
         confirmVisible = await modalConfirm.isVisible().catch(() => false);
-        console.log(`[TasaExcepcion] modal confirmacion visible=${confirmVisible} intento=${i}`);
+        console.log(`[CERT-EX][TasaExcepcion] Modal Confirmación visible=${confirmVisible} intento=${i}`);
         if (confirmVisible) break;
         await page.waitForTimeout(600);
     }
@@ -527,8 +534,10 @@ async function solicitarTasaExcepcion(
     if (!confirmVisible) {
         throw new Error("[CRITICO] No apareciÃ³ el modal de confirmaciÃ³n de tasa de excepciÃ³n.");
     }
+    console.log(`[CERT-EX][TasaExcepcion] Modal Confirmación visible`);
 
     await modalConfirm.getByRole("button", { name: /^Aceptar$/i }).last().click({ force: true });
+    console.log(`[CERT-EX][TasaExcepcion] Click Aceptar confirmación`);
 
     // Iterate visible dialogs to find the one that contains both textarea.p-inputtextarea
     // and a field related to "Tasa pool". Do not rely on dialog title text.
@@ -557,7 +566,7 @@ async function solicitarTasaExcepcion(
     if (!modalSolicitud) {
         throw new Error("[CRITICO] No se encontró el modal de solicitud de tasa de excepción (sin textarea + Tasa pool).");
     }
-    console.log("[TasaExcepcion] modal solicitud localizado por estructura");
+    console.log("[CERT-EX][TasaExcepcion] Modal Solicitud tasa de excepción visible");
 
     // Read the Tasa pool value entirely via DOM evaluate to bypass all Playwright locator
     // fragility. Walks from every leaf node whose text is "Tasa pool", then up to find
@@ -613,9 +622,9 @@ async function solicitarTasaExcepcion(
         return "";
     };
 
-    console.log("[TasaExcepcion] esperando carga de tasa pool");
+    console.log("[CERT-EX][TasaExcepcion] Esperando carga de Tasa pool");
     const valorTasaPool = await esperarTasaPoolCargada(12000);
-    console.log(`[TasaExcepcion] tasa pool final='${valorTasaPool}'`);
+    console.log(`[CERT-EX][TasaExcepcion] Tasa pool=${valorTasaPool}`);
 
     // Re-adquirir el modal con un locator estable basado en filtro estructural.
     // El .nth(i) guardado durante la detección se vuelve stale cuando el modal de
@@ -634,7 +643,7 @@ async function solicitarTasaExcepcion(
     await inputMotivo.click({ force: true }).catch(() => { });
     await inputMotivo.press("Control+A").catch(() => { });
     await inputMotivo.press("Delete").catch(() => { });
-    console.log("[TasaExcepcion] escribiendo motivo en textarea de solicitud");
+    console.log("[CERT-EX][TasaExcepcion] Llenando Motivo de solicitud");
     await inputMotivo.fill("testing").catch(async () => {
         await inputMotivo.pressSequentially("testing", { delay: 25 }).catch(() => { });
     });
@@ -642,7 +651,7 @@ async function solicitarTasaExcepcion(
     await page.waitForTimeout(150);
 
     let valorMotivo = await inputMotivo.inputValue().catch(() => "");
-    console.log(`[TasaExcepcion] motivo tras fill='${valorMotivo}'`);
+    console.log(`[CERT-EX][TasaExcepcion] Motivo llenado=${valorMotivo}`);
     if (!/testing/i.test(String(valorMotivo ?? ""))) {
         console.log("[TasaExcepcion] fill insuficiente, usando evaluate para forzar valor");
         await inputMotivo.evaluate((el: Element) => {
@@ -701,55 +710,66 @@ async function solicitarTasaExcepcion(
     const botonAceptarSolicitud = modalEstable.getByRole("button", { name: /^Aceptar$/i }).last();
     await botonAceptarSolicitud.waitFor({ state: "visible", timeout: 5000 });
 
+    console.log("[CERT-EX][TasaExcepcion] Click Aceptar solicitud tasa excepción");
+
     // Estrategia 1: click normal Playwright
-    console.log("[TasaExcepcion] intento 1: click normal");
+    console.log("[CERT-EX][TasaExcepcion] intento 1: click normal");
     await botonAceptarSolicitud.click().catch(() => {});
     await page.waitForTimeout(1000);
     let modalCerrado = !(await modalEstable.isVisible().catch(() => true));
-    console.log(`[TasaExcepcion] modal cerrado tras click normal: ${modalCerrado}`);
+    console.log(`[CERT-EX][TasaExcepcion] modal cerrado tras click normal: ${modalCerrado}`);
 
     if (!modalCerrado) {
         // Estrategia 2: focus + tecla Enter
-        console.log("[TasaExcepcion] intento 2: focus + Enter");
+        console.log("[CERT-EX][TasaExcepcion] intento 2: focus + Enter");
         await botonAceptarSolicitud.focus().catch(() => {});
         await page.waitForTimeout(200);
         await page.keyboard.press("Enter");
         await page.waitForTimeout(1000);
         modalCerrado = !(await modalEstable.isVisible().catch(() => true));
-        console.log(`[TasaExcepcion] modal cerrado tras Enter: ${modalCerrado}`);
+        console.log(`[CERT-EX][TasaExcepcion] modal cerrado tras Enter: ${modalCerrado}`);
     }
 
     if (!modalCerrado) {
         // Estrategia 3: page.mouse.click en coordenadas exactas del botón
-        console.log("[TasaExcepcion] intento 3: mouse.click en coordenadas");
+        console.log("[CERT-EX][TasaExcepcion] intento 3: mouse.click en coordenadas");
         const box = await botonAceptarSolicitud.boundingBox();
-        console.log(`[TasaExcepcion] bounding box Aceptar: ${JSON.stringify(box)}`);
+        console.log(`[CERT-EX][TasaExcepcion] bounding box Aceptar: ${JSON.stringify(box)}`);
         if (box) {
             await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
             await page.waitForTimeout(100);
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             await page.waitForTimeout(1000);
             modalCerrado = !(await modalEstable.isVisible().catch(() => true));
-            console.log(`[TasaExcepcion] modal cerrado tras mouse.click: ${modalCerrado}`);
+            console.log(`[CERT-EX][TasaExcepcion] modal cerrado tras mouse.click: ${modalCerrado}`);
         }
     }
+
+    // Esperar completamente el cierre del modal de solicitud
+    await modalEstable.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => {});
+    console.log("[CERT-EX][TasaExcepcion] Modal Solicitud tasa excepción cerrado");
 
     // Modal cerrado confirmado — dar tiempo al DOM para estabilizarse antes de continuar.
     await page.waitForTimeout(500);
 
     // Si el interés ya tiene valor numérico válido, no hace falta esperar recálculo
-    const interesInmediato = normalizarNumero((await inputInteres.inputValue().catch(() => "")).trim());
-    if (interesInmediato > 0) {
-        console.log(`[TasaExcepcion] interes ya valido post-modal=${interesInmediato}, sin esperar recalculo`);
-    } else {
-        const recalculoOk = await esperarInteresRecalculado(page, inputInteres, valorInteresAntes, 8000);
-        const valorInteresFinal = (await inputInteres.inputValue().catch(() => "")).trim();
-        console.log(`[TasaExcepcion] interes tras espera='${valorInteresFinal}' recalculo=${recalculoOk}`);
-        if (!recalculoOk && normalizarNumero(valorInteresFinal) <= 0) {
-            throw new Error("[CRITICO] No se recalculó el Interés tras solicitar tasa de excepción.");
+    // Proteger contra inputInteres null
+    if (inputInteres) {
+        const interesInmediato = normalizarNumero((await inputInteres.inputValue().catch(() => "")).trim());
+        if (interesInmediato > 0) {
+            console.log(`[TasaExcepcion] interes ya valido post-modal=${interesInmediato}, sin esperar recalculo`);
+        } else {
+            const recalculoOk = await esperarInteresRecalculado(page, inputInteres, valorInteresAntes, 8000);
+            const valorInteresFinal = (await inputInteres.inputValue().catch(() => "")).trim();
+            console.log(`[TasaExcepcion] interes tras espera='${valorInteresFinal}' recalculo=${recalculoOk}`);
+            if (!recalculoOk && normalizarNumero(valorInteresFinal) <= 0) {
+                throw new Error("[CRITICO] No se recalculó el Interés tras solicitar tasa de excepción.");
+            }
         }
+    } else {
+        console.log(`[CERT-EX][TasaExcepcion] inputInteres es null, no se valida recálculo de interés`);
     }
-    console.log("[TasaExcepcion] funcion completada, retornando al flujo principal");
+    console.log("[CERT-EX][TasaExcepcion] Flujo de excepción completado");
 }
 
 
@@ -913,95 +933,102 @@ async function abrirYAutenticarBizagi(context: BrowserContext): Promise<Page> {
 async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
     console.log(`[TasaExcepcion][Bizagi] buscando caso ${mpn}`);
 
-    // ── Paso 1: Navegar a "Todos los casos" ──────────────────────────────────
-    let navegado = false;
-
-    // Estrategia A: por role link
-    if (!navegado) {
-        try {
-            const enlace = page.getByRole('link', { name: /todos\s+los\s+casos/i }).first();
-            if (await enlace.isVisible({ timeout: 3000 }).catch(() => false)) {
-                await enlace.click({ force: true });
-                await page.waitForTimeout(2000);
-                navegado = true;
-                console.log('[TasaExcepcion][Bizagi] navegado a Todos los casos (link role)');
-            }
-        } catch { }
-    }
-
-    // Estrategia B: cualquier elemento visible con ese texto exacto
-    if (!navegado) {
-        const TEXTO_TODOS = /^Todos\s+los\s+casos$/i;
-        const selectores = ['a', 'span', 'div', 'li', '[role="menuitem"]', '[role="treeitem"]'];
-        for (const sel of selectores) {
-            const candidatos = page.locator(sel).filter({ hasText: TEXTO_TODOS });
-            const count = await candidatos.count().catch(() => 0);
-            for (let i = 0; i < count && !navegado; i++) {
-                const el = candidatos.nth(i);
-                if (await el.isVisible().catch(() => false)) {
-                    await el.click({ force: true }).catch(() => { });
-                    await page.waitForTimeout(2000);
-                    navegado = true;
-                    console.log(`[TasaExcepcion][Bizagi] navegado a Todos los casos (sel='${sel}' idx=${i})`);
-                }
-            }
-            if (navegado) break;
-        }
-    }
-
-    if (!navegado) {
-        console.log('[TasaExcepcion][Bizagi] WARNING: no se pudo navegar a "Todos los casos", continuando desde vista actual');
-    }
-
-    // ── Paso 2: Colocar el MPN en el buscador de Bizagi ─────────────────────
+    // Paso 1: Localizar y usar el buscador superior (menuQuery)
     const selectoresBuscador = [
-        'input[type="search"]',
-        'input[placeholder*="buscar" i]',
-        'input[placeholder*="search" i]',
-        'input[placeholder*="caso" i]',
-        'input[placeholder*="filter" i]',
-        'input[aria-label*="buscar" i]',
-        'input[aria-label*="search" i]',
-        '[class*="search"] input',
-        '[class*="Search"] input',
-        'input[class*="search"]',
-        'input[class*="Search"]',
-        '#searchField',
-        '.inbox-search input',
-        '.bz-search input',
+        '#menuQuery',
+        'input#menuQuery',
+        '#ui-bizagi-wp-widget-searchContainer input',
+        'input[id*="menuQuery"]',
+        'input[name="menuQuery"]',
+        'input[placeholder="Buscar"]',
     ];
 
-    let buscadorUsado = false;
+    let inputBuscador: Locator | null = null;
     for (const sel of selectoresBuscador) {
         try {
             const input = page.locator(sel).first();
-            if (await input.isVisible({ timeout: 1000 }).catch(() => false)) {
-                console.log(`[TasaExcepcion][Bizagi] buscador encontrado: '${sel}' — escribiendo ${mpn}`);
-                await input.click({ force: true });
-                await input.fill(mpn);
-                await input.press('Enter');
-                await page.waitForTimeout(3000);
-                buscadorUsado = true;
+            if (await input.isVisible({ timeout: 2000 }).catch(() => false)) {
+                inputBuscador = input;
+                console.log(`[TasaExcepcion][Bizagi] buscador encontrado: '${sel}'`);
                 break;
             }
         } catch { }
     }
 
-    if (!buscadorUsado) {
-        console.log('[TasaExcepcion][Bizagi] buscador no encontrado, escaneando filas directamente');
+    if (!inputBuscador) {
+        console.log('[TasaExcepcion][Bizagi] buscador superior no encontrado, continuando sin busqueda...');
+        throw new Error(`[CRITICO] Bizagi: no se pudo localizar el buscador superior.`);
     }
 
-    // ── Paso 3: Esperar a que aparezca la fila del caso ─────────────────────
-    const REGEX_ACTIVIDAD = /Gesti(?:o|\u00f3)n Autorizaci(?:o|\u00f3)n Tasa de Excepci(?:o|\u00f3)n/i;
+    // Paso 2: Dispara la busqueda
+    const dispararBusquedaTasaExcepcion = async (input: Locator) => {
+        try {
+            // Enfoque el input
+            await input.focus().catch(() => { });
+
+            // Intenta fill directo
+            await input.fill(mpn).catch(async () => {
+                await input.click({ timeout: 1000 }).catch(() => { });
+                await input.fill(mpn).catch(() => { });
+            });
+
+            // Verifica que el valor se escribio
+            const valor = ((await input.inputValue().catch(() => '')) || '').trim();
+            if (valor !== mpn) {
+                await input.evaluate((el, v) => {
+                    const inputEl = el as HTMLInputElement;
+                    inputEl.value = String(v);
+                    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+                }, mpn).catch(() => { });
+            }
+
+            // Dispara eventos de busqueda
+            await input.evaluate((el) => {
+                const inputEl = el as HTMLInputElement;
+                inputEl.focus();
+                inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+                inputEl.dispatchEvent(new Event('search', { bubbles: true }));
+                inputEl.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter' }));
+                inputEl.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: 'Enter', code: 'Enter' }));
+                inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter', code: 'Enter' }));
+                const form = inputEl.form;
+                if (form) {
+                    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                    form.requestSubmit?.();
+                }
+                inputEl.blur();
+            }).catch(() => { });
+
+            // Press Enter como fallback
+            await input.press('Enter').catch(() => { });
+            await page.keyboard.press('Enter').catch(() => { });
+            await page.waitForTimeout(500);
+        } catch (e) {
+            console.log(`[TasaExcepcion][Bizagi] Error disparando busqueda: ${e}`);
+        }
+    };
+
+    // Dispara la busqueda inicial
+    await dispararBusquedaTasaExcepcion(inputBuscador);
+
+    // Paso 3: Espera a resultados en tabla Bizagi
     const filasPorMpn = page
-        .locator('tr, .p-datatable-row, .grid-row, .bpm-grid-row, li')
-        .filter({ hasText: new RegExp(mpn, "i") });
+        .locator('table#ui-bizagi-wp-app-inbox-grid-cases tbody tr[data-idworkflow]:visible')
+        .filter({ hasText: new RegExp(mpn, 'i') });
+
+    const REGEX_ACTIVIDAD = /Gesti(?:o|ó)n Autorizaci(?:o|ó)n Tasa de Excepci(?:o|ó)n/i;
     const filasPorActividad = page
-        .locator('tr, .p-datatable-row, .grid-row, .bpm-grid-row, li')
+        .locator('table#ui-bizagi-wp-app-inbox-grid-cases tbody tr[data-idworkflow]:visible')
         .filter({ hasText: REGEX_ACTIVIDAD });
 
     const inicio = Date.now();
-    const TIMEOUT_ESPERA = 60000;
+    const TIMEOUT_ESPERA = 30000;
+    let ultimoSegundoLog = -1;
+    let reintentosDisparoCount = 0;
+    const maxReintentosDisparo = 3;
+
     while (Date.now() - inicio < TIMEOUT_ESPERA) {
         const countMpn = await filasPorMpn.count().catch(() => 0);
         if (countMpn > 0) {
@@ -1009,17 +1036,30 @@ async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
             capturas.push(await capturarCuentaComoPNG(page, mpn, `bizagi__caso-encontrado`));
             return;
         }
+
         const countActividad = await filasPorActividad.count().catch(() => 0);
         if (countActividad > 0) {
             console.log(`[TasaExcepcion][Bizagi] fila por actividad encontrada (count=${countActividad})`);
             return;
         }
-        const elapsed = Math.floor((Date.now() - inicio) / 1000);
-        console.log(`[TasaExcepcion][Bizagi] esperando tarea en Bizagi (${elapsed}s)...`);
-        await page.waitForTimeout(2000);
+
+        // Reintentar disparo cada 5 segundos
+        const elapsedMs = Date.now() - inicio;
+        if (inputBuscador && elapsedMs > (reintentosDisparoCount + 1) * 5000 && reintentosDisparoCount < maxReintentosDisparo) {
+            reintentosDisparoCount++;
+            console.log(`[TasaExcepcion][Bizagi] Reintento de busqueda #${reintentosDisparoCount} para ${mpn}...`);
+            await dispararBusquedaTasaExcepcion(inputBuscador);
+        }
+
+        const elapsed = Math.floor(elapsedMs / 1000);
+        if (elapsed !== ultimoSegundoLog) {
+            ultimoSegundoLog = elapsed;
+            console.log(`[TasaExcepcion][Bizagi] esperando resultados para ${mpn} (${elapsed}s)...`);
+        }
+        await page.waitForTimeout(500);
     }
 
-    throw new Error(`[CRITICO] Bizagi no devolvió resultados para ${mpn}.`);
+    throw new Error(`[CRITICO] Bizagi no devolvio resultados para ${mpn}.`);
 }
 
 async function abrirCasoGestionAutorizacionTasaExcepcion(page: Page, mpn: string): Promise<void> {
@@ -1533,13 +1573,22 @@ async function cerrarModalCancelarProcesoSiVisible(page: Page) {
     const visible = await modalCancelarProceso.isVisible().catch(() => false);
     if (!visible) return false;
 
-    const btnMantenerProceso = modalCancelarProceso.getByRole('button', { name: /^Cancelar$/i }).first();
-    if (await btnMantenerProceso.isVisible().catch(() => false)) {
-        await btnMantenerProceso.click({ force: true }).catch(() => { });
-        await modalCancelarProceso.waitFor({ state: 'hidden', timeout: 6000 }).catch(() => { });
-        return true;
-    }
+    // IMPORTANTE: Durante flujo normal NO cierre este modal
+    // Solo registre que apareció
+    console.log('[CERT-EX][Guard][CRITICO] Modal Cancelar proceso de solicitud visible; no se cierra automáticamente');
     return false;
+}
+
+// Helper para validar que NO aparece el modal Cancelar proceso de solicitud
+async function validarNoCancelarProcesoModal(page: Page) {
+    const modalCancelarProceso = page
+        .locator('.p-dialog:visible, [role="dialog"]:visible')
+        .filter({ hasText: /Cancelar proceso de solicitud/i })
+        .first();
+    const visible = await modalCancelarProceso.isVisible().catch(() => false);
+    if (visible) {
+        throw new Error('[CERT-EX][Guard][CRITICO] Modal Cancelar proceso de solicitud apareció durante flujo normal; no se cierra automáticamente');
+    }
 }
 
 async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
@@ -3326,8 +3375,283 @@ async function etapaValidacionesPrevias(page: Page) {
     }
 }
 
+// === FUNCIONES ROBUSTAS DE SELECCIÓN DE PRODUCTOS (patrón de ce-ex adaptado para Certificados) ===
+
+async function seleccionarCategoriaEnSeccionProductosRobusto(page: Page, seccionProductos: Locator) {
+  console.log(`[CERT-EX][Producto][Seleccion] seleccionarCategoriaEnSeccionProductos INIT`);
+  console.log(`[CERT-EX][Producto][Seleccion] Sección Productos visible`);
+
+  // Estrategia 1: Buscar por label "Categoría de producto"
+  console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Categoría por label`);
+  const labelCategoriaBuscadores = [
+    seccionProductos.locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria de producto")]'),
+    seccionProductos.getByText(/Categor[ií]a de producto/i),
+  ];
+
+  let categoriaDropdown: Locator | null = null;
+  for (const labelLocator of labelCategoriaBuscadores) {
+    const visible = await labelLocator.isVisible().catch(() => false);
+    if (visible) {
+      // Encontró el label, ahora buscar el dropdown cercano
+      try {
+        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+        if (dropdownVisible) {
+          console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por label`);
+          categoriaDropdown = dropdownEnParent;
+          break;
+        }
+      } catch (e) {
+        console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+      }
+    }
+  }
+
+  // Estrategia 2: Fallback posicional - usar el primer dropdown visible
+  if (!categoriaDropdown) {
+    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría no encontrado por label; usando fallback posicional`);
+    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+    const count = await dropdowns.count().catch(() => 0);
+    if (count >= 1) {
+      console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por posición 1/${count}`);
+      categoriaDropdown = dropdowns.first();
+    }
+  }
+
+  if (!categoriaDropdown) {
+    console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Categoría de producto`);
+    throw new Error("[CRITICO] No se encontro dropdown de 'Categoria de producto' en la seccion de Productos.");
+  }
+
+  // Verificar si el dropdown ya tiene valor seleccionado
+  const labelDropdown = categoriaDropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+  let valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+  if (valor && !/seleccionar|por favor|elige|--/i.test(valor)) {
+    console.log(`[CERT-EX][Producto][Seleccion] Categoría ya seleccionada: ${valor}`);
+    return;
+  }
+
+  // Abrir el dropdown y seleccionar la categoría
+  for (let intento = 1; intento <= 3; intento++) {
+    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando categoría: Certificados de Deposito (intento ${intento}/3)`);
+    await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+    await categoriaDropdown.scrollIntoViewIfNeeded().catch(() => { });
+    await categoriaDropdown.click({ force: true }).catch(() => { });
+    await page.waitForTimeout(300);
+
+    const combobox = categoriaDropdown.locator('[role="combobox"]').first();
+    const panelId = await combobox.getAttribute("aria-controls").catch(() => null);
+    let panel: Locator | null = null;
+    if (panelId) {
+      const byId = page.locator(`#${panelId}`);
+      const visible = await byId.waitFor({ state: "visible", timeout: 2000 })
+        .then(() => true)
+        .catch(() => false);
+      if (visible) panel = byId;
+    }
+    if (!panel) {
+      const fallback = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').last();
+      const visible = await fallback.waitFor({ state: "visible", timeout: 2000 })
+        .then(() => true)
+        .catch(() => false);
+      if (visible) panel = fallback;
+    }
+
+    if (panel) {
+      // Reintentar si hay botón de reintentar
+      const btnRetryPanel = panel
+        .locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button.p-button-warning')
+        .first();
+      if (await btnRetryPanel.isVisible().catch(() => false)) {
+        await btnRetryPanel.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(800);
+      }
+
+      // Buscar y seleccionar la opción "Certificados de Deposito"
+      const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+      const listo = await items.first().waitFor({ state: "visible", timeout: 3000 })
+        .then(() => true)
+        .catch(() => false);
+      const countItems = await items.count().catch(() => 0);
+      if (listo && countItems > 0) {
+        const itemCategoria = items.filter({ hasText: /Certificados de Deposito|Certificados de depósito|Certificados?/i }).first();
+        if (await itemCategoria.isVisible().catch(() => false)) {
+          console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: Certificados de Deposito`);
+          await itemCategoria.click({ force: true }).catch(() => { });
+        } else {
+          console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: primera opción (índice 0)`);
+          await items.nth(0).click({ force: true }).catch(() => { });
+        }
+      }
+    }
+
+    await page.waitForTimeout(200);
+    valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+    if (valor && !/seleccionar|por favor|elige|--/i.test(valor)) {
+      console.log(`[CERT-EX][Producto][Seleccion] Categoría seleccionada: ${valor}`);
+      return;
+    }
+
+    await page.waitForTimeout(800);
+  }
+
+  throw new Error("[CRITICO] No se pudo seleccionar 'Categoria de producto' en la seccion de Productos.");
+}
+
+async function seleccionarProductoEnSeccionProductosConDropdown(
+  page: Page,
+  productoDropdown: Locator,
+  tipoCuenta: string
+) {
+  try {
+    await productoDropdown.click({ timeout: 3000 }).catch(async () => {
+      await productoDropdown.click({ force: true, timeout: 3000 });
+    });
+
+    const panel = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
+    const panelVisible = await panel.isVisible({ timeout: 5000 }).catch(() => false);
+    if (!panelVisible) {
+      throw new Error(`[Producto][CRITICO] No abrió panel Producto tipoCuenta='${tipoCuenta}'`);
+    }
+
+    console.log('[CERT-EX][Producto][Seleccion] Opciones de Producto visibles');
+
+    const opciones = panel.locator('li[role="option"], .p-dropdown-item, .p-select-option');
+    const total = await opciones.count().catch(() => 0);
+    if (total === 0) {
+      throw new Error(`[CERT-EX][Producto][CRITICO] Panel abierto pero sin opciones tipoCuenta='${tipoCuenta}'`);
+    }
+
+    const nombreRegex = tipoCuenta
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase();
+
+    for (let i = 0; i < total; i++) {
+      const texto = (await opciones.nth(i).innerText().catch(() => '')).trim();
+      const normalizado = texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+      if (normalizado.includes(nombreRegex)) {
+        console.log(`[CERT-EX][Producto][Seleccion] Seleccionando opción: ${texto}`);
+        await opciones.nth(i).click({ force: true }).catch(() => { });
+        console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: ${texto}`);
+        console.log('[CERT-EX][Producto][Seleccion] Validación producto seleccionado OK');
+        return;
+      }
+    }
+
+    console.log(`[CERT-EX][Producto][Seleccion] Tipo '${tipoCuenta}' no encontrado; seleccionando primera opción`);
+    await opciones.nth(0).click({ force: true }).catch(() => { });
+    console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: primera opción`);
+    console.log('[CERT-EX][Producto][Seleccion] Validación producto seleccionado OK');
+  } catch (error) {
+    console.log(`[CERT-EX][Producto][Seleccion][ERROR] Fallo selección directa: ${String(error)}`);
+    throw new Error(`[CRITICO] No se pudo seleccionar Producto para '${tipoCuenta}'.`);
+  }
+}
+
+async function seleccionarProductoEnSeccionProductosRobusto(
+  page: Page,
+  seccionProductos: Locator,
+  tipoCuenta: string,
+  productoDropdownPrelocalizado?: Locator | null
+) {
+  // Si ya tenemos el dropdown prelocalizado, usarlo directamente
+  if (productoDropdownPrelocalizado) {
+    console.log('[CERT-EX][Producto][Seleccion] Usando dropdown Producto previamente detectado por posición 2/2');
+    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
+    console.log('[CERT-EX][Producto][Seleccion] Abriendo dropdown Producto');
+    return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdownPrelocalizado, tipoCuenta);
+  }
+
+  console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Producto por label`);
+
+  // Estrategia 1: Buscar por label "Producto"
+  const labelProductoBuscadores = [
+    seccionProductos.getByText(/^Producto$/i),
+  ];
+
+  let productoDropdown: Locator | null = null;
+  for (const labelLocator of labelProductoBuscadores) {
+    const visible = await labelLocator.isVisible().catch(() => false);
+    if (visible) {
+      // Encontró el label, ahora buscar el dropdown cercano
+      try {
+        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+        if (dropdownVisible) {
+          console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por label`);
+          productoDropdown = dropdownEnParent;
+          break;
+        }
+      } catch (e) {
+        console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+      }
+    }
+  }
+
+  // Estrategia 2: Fallback posicional - usar el segundo dropdown visible (el primero es Categoría)
+  if (!productoDropdown) {
+    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto no encontrado por label; usando fallback posicional`);
+    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+    const count = await dropdowns.count().catch(() => 0);
+    console.log(`[CERT-EX][Producto][Seleccion] dropdowns en sección Productos=${count}`);
+    if (count >= 2) {
+      console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por posición 2/${count}`);
+      productoDropdown = dropdowns.nth(1);
+    } else {
+      console.log(`[CERT-EX][Producto][Seleccion] Producto no listo: solo ${count} dropdown visible; NO se usará como Producto`);
+    }
+  }
+
+  if (!productoDropdown) {
+    console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Producto`);
+    throw new Error("[CRITICO] No se encontro dropdown de 'Producto' en la seccion de Productos.");
+  }
+
+  console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
+  return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdown, tipoCuenta);
+}
+
 async function etapaSeccionProductos(context: BrowserContext, page: Page, registro: RegistroExcel) {
-    console.log(`[SeccionProductos] inicio url=${page.url()}`);
+    const url = page.url();
+    console.log(`[SeccionProductos] inicio url=${url}`);
+
+    // === GUARDS: Validar estado antes de Productos ===
+    console.log('[CERT-EX][Guard] Validando estado antes de Productos');
+
+    // Guard 1: Validar URL /requests/{id}/edit
+    if (!/\/requests\/\d+\/edit/i.test(url)) {
+        throw new Error(`[CERT-EX][Guard][CRITICO] URL inv\u00e1lida antes de Productos: ${url}`);
+    }
+    console.log('[CERT-EX][Guard] URL v\u00e1lida');
+
+    // Guard 2: Validar que no existe Request Id 0
+    const requestId0Visible = await page
+        .getByText(/La entidad Request con el Id\.?\s*0 no existe|Error al crear cliente/i)
+        .first()
+        .isVisible()
+        .catch(() => false);
+    if (requestId0Visible) {
+        console.log('[CERT-EX][Guard][CRITICO] Request Id 0 detectado; no se contin\u00faa');
+        await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => {});
+        throw new Error('[CERT-EX][Guard][CRITICO] Request Id 0 detectado; no se contin\u00faa a Productos');
+    }
+    console.log('[CERT-EX][Guard] requestId0Visible=false');
+
+    // Guard 3: Validar que NO aparece modal Cancelar proceso de solicitud
+    const modalCancelarProceso = page
+        .locator('.p-dialog:visible, [role="dialog"]:visible')
+        .filter({ hasText: /Cancelar proceso de solicitud/i })
+        .first();
+    const modalCancelarVisible = await modalCancelarProceso.isVisible().catch(() => false);
+    if (modalCancelarVisible) {
+        console.log('[CERT-EX][Guard][CRITICO] Modal Cancelar proceso de solicitud visible; no se cierra autom\u00e1ticamente');
+        throw new Error('[CERT-EX][Guard][CRITICO] Modal Cancelar proceso de solicitud visible al inicio de etapaSeccionProductos');
+    }
+    console.log('[CERT-EX][Guard] modalCancelarVisible=false');
+
     await resolverCorreoPredeterminadoYContinuarSiVisible(page).catch(() => false);
 
     const alertSinProductosPaso = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
@@ -3343,7 +3667,11 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
     for (let i = 1; i <= 10; i++) {
         console.log(`[SeccionProductos] iter=${i}`);
         await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
-        await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+
+        // No cerrar modal Cancelar proceso de solicitud; solo validar que no aparece
+        await validarNoCancelarProcesoModal(page).catch(() => {
+            console.log('[SeccionProductos] Modal Cancelar proceso detectado; continuando...');
+        });
 
         await tituloProductos.scrollIntoViewIfNeeded().catch(() => { });
         await page.mouse.wheel(0, 600).catch(() => { });
@@ -3413,9 +3741,73 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         throw new Error("[CRITICO] No se pudo visualizar 'Categoria de producto' para agregar el producto.");
     }
 
-    await seleccionarCategoriaEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
-    await seccionProductos.waitFor({ state: "visible", timeout: 10000 }).catch(() => { });
-    await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro.tipoCuenta);
+    // === INICIO: Patrón robusto de selección de Categoría/Producto (replicado de ce-ex.spec.ts) ===
+    console.log('[CERT-EX][Producto][Seleccion] Esperando pantalla Productos');
+    const maxEsperaProductos = 12000;
+    const inicioEspera = Date.now();
+    let pantallaProductosDetectada = false;
+
+    while (Date.now() - inicioEspera < maxEsperaProductos) {
+      if (page.isClosed()) {
+        throw new Error('[CERT-EX][PAGE][CLOSED] Page cerrada mientras esperaba pantalla Productos');
+      }
+
+      const categoriaVisible_signal = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+      const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+      const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
+
+      const signals = [categoriaVisible_signal, productoVisible, productosTextVisible];
+      const signalsCount = signals.filter(Boolean).length;
+
+      if (signalsCount >= 2) {
+        console.log(`[CERT-EX][Producto][Seleccion] Señales de pantalla Productos detectadas (${signalsCount}/3): categoría=${categoriaVisible_signal}, producto=${productoVisible}, productos=${productosTextVisible}`);
+        pantallaProductosDetectada = true;
+        break;
+      }
+
+      await page.waitForTimeout(500);
+    }
+
+    if (!pantallaProductosDetectada) {
+      console.log('[CERT-EX][Producto][Seleccion][WARN] Pantalla Productos no detectada en timeout, verificando si hay modal de error');
+      const modalError = page.locator('.p-dialog:visible, [role="dialog"]:visible').first();
+      const tieneModal = await modalError.isVisible().catch(() => false);
+      if (tieneModal) {
+        throw new Error('[CERT-EX][PAGE][MODAL] Modal de error visible después de Continuar');
+      }
+    }
+
+    console.log(`[CERT-EX][Producto][Seleccion] Sección Productos visible=${pantallaProductosDetectada}`);
+
+    // Llamar a selección robusta de categoría
+    await seleccionarCategoriaEnSeccionProductosRobusto(page, seccionProductos);
+    await page.waitForTimeout(1500);
+
+    // Contar dropdowns y decidir si llamar a selección robusta de producto
+    const dropdownsPostCategoria = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
+    console.log(`[CERT-EX][Producto][Seleccion] Dropdowns después de categoría: ${dropdownsPostCategoria}`);
+
+    if (dropdownsPostCategoria >= 2) {
+      // Hay al menos 2 dropdowns (categoría + producto)
+      const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
+      await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
+    } else if (dropdownsPostCategoria === 1) {
+      // Solo hay 1 dropdown visible - esperar a que aparezca el producto y reintentar
+      console.log('[CERT-EX][Producto][Seleccion] Solo 1 dropdown visible; esperando producto...');
+      for (let i = 0; i < 4; i++) {
+        await page.waitForTimeout(600);
+        const dropdownsNow = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
+        if (dropdownsNow >= 2) {
+          console.log(`[CERT-EX][Producto][Seleccion] Producto dropdown ahora visible (intento ${i + 1})`);
+          const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
+          await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
+          break;
+        }
+      }
+    } else {
+      // Sin dropdowns - no hacer nada
+      console.log('[CERT-EX][Producto][Seleccion] Sin dropdowns visibles - producto posiblemente ya fue seleccionado');
+    }
 
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
     const confirmarProductoAgregado = async () => {
@@ -3452,6 +3844,42 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
 
 
 
+    // Helper para localizar inputs editables después de un label
+    const localizarInputEditableDespuesDeLabel = async (
+      modal: Locator,
+      labelRx: RegExp
+    ): Promise<Locator> => {
+      const label = modal.getByText(labelRx).first();
+      await label.waitFor({ state: 'visible', timeout: 15000 });
+
+      console.log(`[CERT-EX][Certificados][Modal] Localizando input editable para ${labelRx}`);
+
+      // Buscar todos los inputs DESPUÉS del label (no ancestor)
+      // Excluir readonly, disabled, y hidden
+      const candidatos = label.locator(
+        'xpath=following::input[not(@readonly) and not(@disabled) and not(ancestor::*[contains(@style,"display: none")])]'
+      );
+
+      const count = await candidatos.count().catch(() => 0);
+
+      for (let i = 0; i < count; i++) {
+        const input = candidatos.nth(i);
+        const visible = await input.isVisible().catch(() => false);
+        const editable = await input.isEditable().catch(() => false);
+        const value = (await input.inputValue().catch(() => '')).trim();
+        const outerHtml = (await input.evaluate((el: any) => (el as HTMLElement).outerHTML).catch(() => ''));
+
+        console.log(`[CERT-EX][Certificados][Modal] candidato ${labelRx} #${i} visible=${visible} editable=${editable} value="${value.substring(0, 50)}" outer=${outerHtml.substring(0, 250)}`);
+
+        if (visible && editable) {
+          console.log(`[CERT-EX][Certificados][Modal] Campo ${labelRx} editable localizado`);
+          return input;
+        }
+      }
+
+      throw new Error(`[CERT-EX][Certificados][CRITICO] No se encontró input editable para ${labelRx}`);
+    };
+
     const llenarModalCertificado = async () => {
         const dialogo = page
             .locator('.p-dialog:visible, [role="dialog"]:visible')
@@ -3459,34 +3887,72 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
             .last();
 
         await dialogo.waitFor({ state: 'visible', timeout: 25000 });
+        console.log('[CERT-EX][Certificados][Modal] Modal visible detectado');
 
-        const bloqueConfig = dialogo
-            .locator('xpath=.//*[self::div or self::section][.//*[contains(normalize-space(.),"Moneda")] and .//*[contains(normalize-space(.),"Monto")] and .//*[contains(normalize-space(.),"Plazo")]]')
-            .first();
+        // Diagnosticar modal antes de intentar llenar
+        const modalTexto = (await dialogo.innerText().catch(() => '')).substring(0, 3000);
+        const inputsCount = await dialogo.locator('input').count().catch(() => 0);
+        const dropdownsCount = await dialogo.locator('div.p-dropdown, [data-pc-name="dropdown"]').count().catch(() => 0);
+        const monedaLabels = await dialogo.getByText(/Moneda/i).count().catch(() => 0);
+        const montoLabels = await dialogo.getByText(/Monto/i).count().catch(() => 0);
+        const plazoLabels = await dialogo.getByText(/Plazo/i).count().catch(() => 0);
+        const tasaLabels = await dialogo.getByText(/Tasa/i).count().catch(() => 0);
 
-        const bloqueVisible = await bloqueConfig.isVisible().catch(() => false);
-        if (!bloqueVisible) {
-            throw new Error("[CRITICO] No se encontrÃ³ el bloque superior de configuraciÃ³n del certificado.");
+        console.log(`[CERT-EX][Certificados][Modal] Texto modal: ${modalTexto.substring(0, 200)}...`);
+        console.log(`[CERT-EX][Certificados][Modal] labels Moneda=${monedaLabels} Monto=${montoLabels} Plazo=${plazoLabels} Tasa=${tasaLabels}`);
+        console.log(`[CERT-EX][Certificados][Modal] inputs=${inputsCount} dropdowns=${dropdownsCount}`);
+
+        // Localizar campos editables dentro del modal (obligatorios)
+        let inputMonto: Locator;
+        let inputPlazo: Locator;
+        let inputTasa: Locator | null = null;
+        let inputInteres: Locator | null = null;
+
+        try {
+          inputMonto = await localizarInputEditableDespuesDeLabel(dialogo, /^Monto$/i);
+        } catch (e) {
+          console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
+          throw new Error("[CRITICO] No se localizó campo editable Monto en modal de certificado.");
         }
-        const inputMonto = bloqueConfig
-            .locator('xpath=(.//*[normalize-space(text())="Monto"]/following::input[not(@type="hidden") and not(@readonly)][1])')
-            .first();
-        const inputPlazo = bloqueConfig
-            .locator('xpath=(.//*[contains(normalize-space(.),"Plazo")]/following::input[not(@type="hidden") and not(@readonly)][1])')
-            .first();
-        const inputTasa = bloqueConfig
-            .locator('xpath=(.//*[contains(normalize-space(.),"Tasa")]/following::input[not(@type="hidden")][1])')
-            .first();
-        const inputInteres = dialogo
-            .locator('xpath=(.//*[contains(normalize-space(.),"Inter")]/following::input[not(@type="hidden") and contains(@class,"p-inputtext")][1])')
-            .first();
 
-        await inputMonto.waitFor({ state: 'visible', timeout: 8000 });
-        await inputPlazo.waitFor({ state: 'visible', timeout: 8000 });
-        await inputTasa.waitFor({ state: 'visible', timeout: 8000 });
-        await inputInteres.waitFor({ state: 'visible', timeout: 8000 });
+        try {
+          inputPlazo = await localizarInputEditableDespuesDeLabel(dialogo, /^Plazo$/i);
+        } catch (e) {
+          console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
+          throw new Error("[CRITICO] No se localizó campo editable Plazo en modal de certificado.");
+        }
+
+        // Campos opcionales
+        try {
+          inputTasa = await localizarInputEditableDespuesDeLabel(dialogo, /^Tasa$/i);
+        } catch (e) {
+          console.log(`[CERT-EX][Certificados][Modal] Tasa no es editable o no encontrada (opcional)`);
+        }
+
+        try {
+          inputInteres = await localizarInputEditableDespuesDeLabel(dialogo, /^Inter[eé]s$/i);
+        } catch (e) {
+          console.log(`[CERT-EX][Certificados][Modal] Interés no es editable o no encontrada (opcional)`);
+        }
+
+        // Validar que son editables
+        const montoEditable = await inputMonto.isEditable({ timeout: 10000 }).catch(() => false);
+        if (!montoEditable) {
+          throw new Error("[CRITICO] Campo Monto no es editable después de localización.");
+        }
+
+        const plazoEditable = await inputPlazo.isEditable({ timeout: 10000 }).catch(() => false);
+        if (!plazoEditable) {
+          throw new Error("[CRITICO] Campo Plazo no es editable después de localización.");
+        }
+
+        await inputMonto.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        await inputPlazo.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        if (inputTasa) await inputTasa.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        if (inputInteres) await inputInteres.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
 
         // MONTO
+        console.log('[CERT-EX][Certificados][Modal] Llenando campo Monto');
         await inputMonto.scrollIntoViewIfNeeded().catch(() => { });
         await inputMonto.click({ force: true });
         await inputMonto.press('Control+A').catch(() => { });
@@ -3514,7 +3980,10 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
             valorMonto = (await inputMonto.inputValue().catch(() => '')).trim();
         }
 
+        console.log('[CERT-EX][Certificados][Modal] Campo Monto llenado');
+
         // PLAZO
+        console.log('[CERT-EX][Certificados][Modal] Llenando campo Plazo');
         await inputPlazo.scrollIntoViewIfNeeded().catch(() => { });
         await inputPlazo.click({ force: true });
         await inputPlazo.press('Control+A').catch(() => { });
@@ -3542,6 +4011,8 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
             valorPlazo = (await inputPlazo.inputValue().catch(() => '')).trim();
         }
 
+        console.log('[CERT-EX][Certificados][Modal] Campo Plazo llenado');
+
         const montoValido = !!valorMonto && /50[\.,]?0*00|50000/i.test(valorMonto.replace(/\s/g, ''));
         const plazoValido = !!valorPlazo && /^12\b|12\s*mes/i.test(valorPlazo);
 
@@ -3549,64 +4020,145 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
             throw new Error(`[CRITICO] No se pudieron completar correctamente Monto/Plazo. monto='${valorMonto}' plazo='${valorPlazo}'`);
         }
 
+        console.log('[CERT-EX][Certificados][Modal] Campos requeridos validados');
+
         await inputPlazo.press('Tab').catch(() => { });
         await inputPlazo.blur().catch(() => { });
 
-        const esperarTasaEInteresCalculados = async (timeoutMs = 12000) => {
-            const inicio = Date.now();
-
-            const contieneNumMayorACero = (txt: string) => {
-                const digitos = txt.replace(/[^\d]/g, '');
-                return digitos.length > 0 && parseInt(digitos, 10) > 0;
-            };
-
-            while (Date.now() - inicio < timeoutMs) {
-                const valorTasa = (await inputTasa.inputValue().catch(() => '')).trim();
-                const valorInteres = (await inputInteres.inputValue().catch(() => '')).trim();
-
-                console.log(`[Certificados] esperando tasa='${valorTasa}' e interes='${valorInteres}'`);
-
-                const tasaLista = !!valorTasa && /%/.test(valorTasa) && contieneNumMayorACero(valorTasa);
-                const interesValido = !!valorInteres && contieneNumMayorACero(valorInteres);
-                const esProducto = /(dep[oÃ³]sito|producto|financiero|capitalizable)/i.test(valorInteres);
-                const interesListo = interesValido && !esProducto;
-
-                if (tasaLista && interesListo) {
-                    console.log(`[Certificados] cálculos listos: tasa='${valorTasa}', interes='${valorInteres}'`);
-                    return true;
-                }
-
-                await page.waitForTimeout(150);
+        // Helper para esperar tasa calculada (protegido contra inputInteres null)
+        const esperarTasaCalculadaCertificado = async (timeoutMs = 12000): Promise<string> => {
+            if (!inputTasa) {
+                throw new Error('[CERT-EX][Certificados][CRITICO] Campo Tasa no localizado');
             }
 
-            return false;
+            console.log('[CERT-EX][Certificados][Modal] Esperando cálculo de tasa');
+
+            for (let intento = 1; intento <= 10; intento++) {
+                const valor = await inputTasa.inputValue().catch(() => '');
+                const trimmed = valor.trim();
+
+                console.log(`[CERT-EX][Certificados][Modal] Esperando tasa intento=${intento}/10 valor="${trimmed}"`);
+
+                // Validar que tasa tenga valor y formato de porcentaje
+                if (trimmed && trimmed !== '0' && trimmed !== '0.00' && /%/.test(trimmed)) {
+                    console.log(`[CERT-EX][Certificados][Modal] Tasa calculada: ${trimmed}`);
+                    return trimmed;
+                }
+
+                // Disparadores suaves: Tab y click en intentos específicos
+                if (intento === 1 || intento === 4 || intento === 7) {
+                    try {
+                        await inputTasa.click({ force: true }).catch(() => {});
+                        await page.keyboard.press('Tab').catch(() => {});
+                    } catch (e) {
+                        // Continuar sin fallar
+                    }
+                }
+
+                await page.waitForTimeout(1000);
+            }
+
+            // Si llegamos aquí, la tasa no se calculó. Intentar botón "Calcular tasa"
+            console.log('[CERT-EX][Certificados][Modal] Buscando botón para calcular tasa');
+            const btnCalcularTasa = dialogo.getByRole('button', { name: /Calcular|calcular tasa|Buscar|buscar/i }).first();
+            const btnVisible = await btnCalcularTasa.isVisible().catch(() => false);
+
+            if (btnVisible) {
+                console.log('[CERT-EX][Certificados][Modal] Botón calcular tasa visible=true');
+                await btnCalcularTasa.click().catch(() => {});
+                await page.waitForTimeout(1500);
+
+                // Intentar leer tasa una vez más después del click
+                const valorFinal = await inputTasa.inputValue().catch(() => '');
+                if (valorFinal.trim() && /%/.test(valorFinal.trim())) {
+                    console.log(`[CERT-EX][Certificados][Modal] Tasa calculada después de botón: ${valorFinal.trim()}`);
+                    return valorFinal.trim();
+                }
+            } else {
+                console.log('[CERT-EX][Certificados][Modal] Botón calcular tasa visible=false');
+            }
+
+            const textoModal = await dialogo.innerText().catch(() => '');
+            console.log('[CERT-EX][Certificados][Modal][DIAG] Texto modal al fallar tasa: ' + textoModal.slice(0, 3000));
+            throw new Error('[CERT-EX][Certificados][CRITICO] Tasa no calculada después de llenar Monto y Plazo');
         };
 
-        const calculosListos = await esperarTasaEInteresCalculados(8000);
-
-        if (!calculosListos) {
-            console.log("[Certificados] No se detectó cálculo de tasa/interés en 8s. Esperando fallback de 2s antes de aceptar.");
-            await page.waitForTimeout(2000);
+        // Leer Interés si existe (campo opcional)
+        let valorInteres = '';
+        if (inputInteres) {
+            valorInteres = await inputInteres.inputValue().catch(() => '');
+            console.log(`[CERT-EX][Certificados][Modal] Interés actual="${valorInteres.trim()}"`);
+        } else {
+            console.log('[CERT-EX][Certificados][Modal] Interés no localizado/no editable; se omite lectura obligatoria');
         }
 
+        // === FASE 1: ESPERAR Y VALIDAR TASA AUTOMÁTICA ===
+        console.log('[CERT-EX][Certificados][Modal] Esperando cálculo de tasa automática');
+        let tasaCalculada = '';
+        try {
+            tasaCalculada = await esperarTasaCalculadaCertificado(8000);
+        } catch (e) {
+            console.log(`[CERT-EX][Certificados][Modal] Error esperando tasa: ${String(e)}`);
+            throw e;
+        }
+        console.log(`[CERT-EX][Certificados][Modal] Tasa automática calculada: ${tasaCalculada}`);
+
+        // === FASE 2: MANEJO DE TASA DE EXCEPCIÓN (BLOQUEANTE) ===
         const tasaExepcionSi = esValorSi(registro.tasaExepcion);
         if (tasaExepcionSi) {
+            console.log('[CERT-EX][TasaExcepcion] Inicia manejo de tasa de excepción');
             const valorTasaExcel = String(registro.valorTasa ?? "").trim();
             if (!valorTasaExcel) {
                 throw new Error("[CRITICO] Registro marcado con Tasa Exepcion=SI sin Valor Tasa en Excel.");
             }
+            console.log(`[CERT-EX][TasaExcepcion] Aplica tasa excepción=true valorExcel=${valorTasaExcel}`);
+            console.log(`[CERT-EX][TasaExcepcion] Tasa automática antes de excepción=${tasaCalculada}`);
 
             const tasaEditable = await esperarCampoTasaEditable(page, inputTasa, 12000);
             if (!tasaEditable) {
-                throw new Error("[CRITICO] El campo Tasa no quedÃ³ editable para solicitar excepciÃ³n.");
+                throw new Error("[CRITICO] El campo Tasa no quedó editable para solicitar excepción.");
             }
 
+            // Ejecutar flujo de tasa de excepción (bloqueante)
             await solicitarTasaExcepcion(page, inputTasa, inputInteres, valorTasaExcel);
+
+            // IMPORTANTE: Validar que el modal de tasa de excepción se cerró completamente
+            console.log('[CERT-EX][TasaExcepcion] Validando cierre completo del flujo de tasa excepción');
+            await page.waitForTimeout(1000);
+
+            const modalTasaExcepcionAun = await page
+                .locator('.p-dialog:visible, [role="dialog"]:visible')
+                .filter({ hasText: /Solicitud tasa de excepci[oó]n|Motivo de solicitud|Tasa m[aá]xima|Tasa solicitada|Tasa pool|Esta tasa se encuentra por encima/i })
+                .first()
+                .isVisible()
+                .catch(() => false);
+
+            if (modalTasaExcepcionAun) {
+                throw new Error('[CERT-EX][TasaExcepcion][CRITICO] Modal de tasa excepción sigue abierto después de solicitarTasaExcepcion');
+            }
+            console.log('[CERT-EX][TasaExcepcion] Flujo de excepción completado; modal cerrado');
+        } else {
+            console.log('[CERT-EX][TasaExcepcion] Tasa excepción no aplica; continuando con flujo normal');
         }
 
-        console.log("[Certificados] llegando a click Aceptar en modal certificados");
+        // === FASE 3: VALIDAR QUE NO HAY MODAL DE TASA EXCEPCIÓN ABIERTO ANTES DE ACEPTAR ===
+        console.log('[CERT-EX][Certificados][Modal] Validando que no hay modal de tasa excepción abierto');
+        const modalTasaExcepcionAbiertoAntes = await page
+            .locator('.p-dialog:visible, [role="dialog"]:visible')
+            .filter({ hasText: /Solicitud tasa de excepci[oó]n|Motivo de solicitud|Tasa m[aá]xima|Tasa solicitada|Tasa pool|Esta tasa se encuentra por encima/i })
+            .first()
+            .isVisible()
+            .catch(() => false);
+
+        if (modalTasaExcepcionAbiertoAntes) {
+            throw new Error('[CERT-EX][Certificados][CRITICO] Intento de Aceptar modal mientras modal de tasa excepción sigue abierto');
+        }
+        console.log('[CERT-EX][Certificados][Modal] No hay modal de tasa excepción abierto; se permite Aceptar final');
+
+        // === FASE 4: ACEPTAR MODAL PRINCIPAL ===
+        console.log("[CERT-EX][Certificados][Modal] Click en Aceptar final del modal principal");
         const btnAceptar = dialogo.getByRole('button', { name: /^Aceptar$/i }).last();
-        await btnAceptar.waitFor({ state: 'visible', timeout: 5000 });
+        await btnAceptar.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
 
         // Click normal primero
         await btnAceptar.click().catch(() => {});
@@ -3615,14 +4167,32 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         // Si el dialog sigue abierto, usar focus + Enter (mismo patrón que cierra el modal de tasa excepción)
         const dialogoSigueAbierto = await dialogo.isVisible().catch(() => false);
         if (dialogoSigueAbierto) {
-            console.log("[Certificados] click normal no cerró modal, usando focus+Enter");
+            console.log("[CERT-EX][Certificados][Modal] Click normal no cerró modal, usando focus+Enter");
             await btnAceptar.focus().catch(() => {});
             await page.waitForTimeout(200);
             await page.keyboard.press("Enter");
         }
 
-        await dialogo.waitFor({ state: 'hidden', timeout: 20000 });
+        await dialogo.waitFor({ state: 'hidden', timeout: 20000 }).catch(() => {});
+        console.log('[CERT-EX][Certificados][Modal] Modal principal cerrado correctamente');
         await page.waitForTimeout(1200);
+        console.log('[CERT-EX][Certificados][Modal] Certificado agregado correctamente');
+
+        // === FASE 5: CONTINUAR FLUJO NORMAL CON BOTÓN CONTINUAR/SIGUIENTE ===
+        console.log('[CERT-EX][Producto][Avance] Buscando botón Continuar');
+        const btnContinuar = page
+            .getByRole('button', { name: /^Continuar$|^Siguiente$|^Siguiente paso$/i })
+            .first();
+        const btnContinuarVisible = await btnContinuar.isVisible().catch(() => false);
+
+        if (btnContinuarVisible) {
+            console.log('[CERT-EX][Producto][Avance] Click en Continuar');
+            await btnContinuar.click().catch(() => {});
+            await page.waitForTimeout(1000);
+            console.log('[CERT-EX][Producto][Avance] Continuando flujo normal');
+        } else {
+            console.log('[CERT-EX][Producto][Avance] Botón Continuar no visible');
+        }
     };
 
 
