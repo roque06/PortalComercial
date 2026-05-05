@@ -568,21 +568,27 @@ async function solicitarTasaExcepcion(
     }
     console.log("[CERT-EX][TasaExcepcion] Modal Solicitud tasa de excepción visible");
 
-    // Read the Tasa pool value entirely via DOM evaluate to bypass all Playwright locator
-    // fragility. Walks from every leaf node whose text is "Tasa pool", then up to find
-    // the nearest ancestor that contains an <input>, and reads all possible value sources.
-    const leerValorTasaPool = async (): Promise<string> => {
-        return modalSolicitud.evaluate((modal: Element) => {
-            // Collect all leaf-ish nodes whose trimmed text is exactly "Tasa pool".
-            const allNodes = [...modal.querySelectorAll("*")] as HTMLElement[];
+    // Relocalize immediately after detection using dynamic filter to avoid staleness
+    // El .nth(i) guardado se vuelve stale cuando el modal de confirmación se cierra
+    console.log("[CERT-EX][TasaExcepcion] Relocalizando modal Solicitud tasa excepción estable");
+    const modalEstable = page
+        .locator('.p-dialog:visible, [role="dialog"]:visible')
+        .filter({ hasText: /Solicitud tasa de excepción|Motivo de solicitud|Tasa máxima|Tasa solicitada|Tasa pool/i })
+        .last();
+    await modalEstable.waitFor({ state: 'visible', timeout: 15000 });
+
+    // Helper to read Tasa pool value tolerantly from a stable modal reference
+    const leerTasaPoolDesdeModal = async (modal: Locator): Promise<string> => {
+        return modal.evaluate((root: Element) => {
+            // Collect all leaf-ish nodes whose trimmed text is exactly "Tasa pool"
+            const allNodes = [...root.querySelectorAll("*")] as HTMLElement[];
             const labels = allNodes.filter(el =>
                 el.childElementCount === 0 &&
                 (el.textContent ?? "").trim() === "Tasa pool"
             );
-            console.log("[TasaExcepcion][DOM] nodos label Tasa pool=" + labels.length);
 
             for (const label of labels) {
-                // Walk up max 6 levels looking for an ancestor that contains an <input>.
+                // Walk up max 6 levels looking for an ancestor that contains an <input>
                 let container: HTMLElement | null = label.parentElement;
                 for (let depth = 0; depth < 6; depth++) {
                     if (!container) break;
@@ -594,11 +600,6 @@ async function solicitarTasaExcepcion(
                         const valAttr  = input.getAttribute("value") ?? "";
                         const text     = (container.textContent ?? "").replace("Tasa pool", "").trim();
                         const matchTxt = text.match(/\d[\d.,]*%?/)?.[0] ?? "";
-                        console.log(
-                            `[TasaExcepcion][DOM] depth=${depth}` +
-                            ` ariaText='${ariaText}' ariaNow='${ariaNow}'` +
-                            ` valProp='${valProp}' valAttr='${valAttr}' textMatch='${matchTxt}'`
-                        );
                         const resolved = ariaText || ariaNow || valProp || valAttr || matchTxt;
                         if (resolved && /\d/.test(resolved)) return resolved;
                     }
@@ -609,30 +610,18 @@ async function solicitarTasaExcepcion(
         }).catch(() => "");
     };
 
-    const esperarTasaPoolCargada = async (timeoutMs = 12000) => {
-        const inicio = Date.now();
-        while (Date.now() - inicio < timeoutMs) {
-            const valor = (await leerValorTasaPool()).trim();
-            console.log(`[TasaExcepcion] tasa pool lectura='${valor}'`);
-            if (valor && /\d/.test(valor)) return valor;
-            await page.waitForTimeout(300);
-        }
-        // Non-fatal: log warning and proceed — textarea visibility already confirms modal is ready.
-        console.log("[TasaExcepcion] ADVERTENCIA: no se pudo leer Tasa pool; continuando de todas formas");
-        return "";
-    };
-
-    console.log("[CERT-EX][TasaExcepcion] Esperando carga de Tasa pool");
-    const valorTasaPool = await esperarTasaPoolCargada(12000);
-    console.log(`[CERT-EX][TasaExcepcion] Tasa pool=${valorTasaPool}`);
-
-    // Re-adquirir el modal con un locator estable basado en filtro estructural.
-    // El .nth(i) guardado durante la detección se vuelve stale cuando el modal de
-    // confirmación se cierra y los índices de diálogos cambian.
-    const modalEstable = page
-        .locator('.p-dialog, [role="dialog"]')
-        .filter({ has: page.locator('textarea.p-inputtextarea') })
-        .last();
+    // Non-blocking Tasa pool read: max 3 seconds (6 retries × 500ms)
+    // If unsuccessful, continue anyway if textarea is visible
+    let tasaPool = "";
+    for (let i = 1; i <= 6; i++) {
+        tasaPool = (await leerTasaPoolDesdeModal(modalEstable)).trim();
+        console.log(`[CERT-EX][TasaExcepcion] Tasa pool intento=${i}/6 valor="${tasaPool}"`);
+        if (tasaPool && /\d/.test(tasaPool)) break;
+        await page.waitForTimeout(500);
+    }
+    if (!tasaPool) {
+        console.log("[CERT-EX][TasaExcepcion] Tasa pool no leída, pero textarea visible; continuo con motivo");
+    }
 
     const inputMotivo = modalEstable.locator('textarea.p-inputtextarea').first();
     const motivoVisible = await inputMotivo.isVisible().catch(() => false);
