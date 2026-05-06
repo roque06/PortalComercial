@@ -2663,7 +2663,7 @@ async function refrescarOfacDescartarConConfirmar(bizagiPage: Page): Promise<voi
   await comboMotivo.click({ force: true }).catch(() => {});
 }
 
-async function completarOtrasCoincidenciasEnGestionMixtaSiExisten(page: Page): Promise<boolean> {
+export async function completarOtrasCoincidenciasEnGestionMixtaSiExisten(page: Page): Promise<boolean> {
   console.log('[OtrasCoincidencias] helper iniciando búsqueda de filas con combos Acción');
 
   await page.waitForTimeout(800);
@@ -2838,6 +2838,27 @@ async function completarOtrasCoincidenciasEnGestionMixtaSiExisten(page: Page): P
     if (listaPepVisible || lexisVisible) {
       console.log(`[OtrasCoincidencias][CRITICO] Hay señales de Otras Coincidencias visibles pero no se pudieron asociar filas a combos. combos=${combosVisibles.length} listaPepVisible=${listaPepVisible} lexisVisible=${lexisVisible}`);
       throw new Error(`[OtrasCoincidencias][CRITICO] Otras Coincidencias visible pero filas no procesables`);
+    }
+
+    const diagOtrasAntesNoAplica = await page.evaluate(() => {
+      const txt = document.body?.innerText || '';
+      return {
+        tieneGestion: /Gestionar Coincidencias/i.test(txt),
+        tieneOtras: /Otras Coincidencias/i.test(txt),
+        tieneLexis: /Lexis Nexis/i.test(txt),
+        tienePlaceholder: /Por favor seleccione/i.test(txt),
+        tieneOFAC: /Coincidencias OFAC/i.test(txt),
+        url: location.href
+      };
+    }).catch(e => ({ error: String(e) }));
+
+    console.log(`[OtrasCoincidencias][ceExBizagi] diag antes no aplica=${JSON.stringify(diagOtrasAntesNoAplica)}`);
+
+    if (
+      'tieneLexis' in diagOtrasAntesNoAplica &&
+      diagOtrasAntesNoAplica.tieneLexis
+    ) {
+      throw new Error('[OtrasCoincidencias][CRITICO] ceExBizagi.ts intentó marcar no aplica, pero Lexis Nexis está visible');
     }
 
     console.log('[OtrasCoincidencias] no hay filas de Otras Coincidencias visibles; no aplica');

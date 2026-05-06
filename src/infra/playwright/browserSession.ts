@@ -18,9 +18,9 @@ function resolveProfileDirectory(profileRoot: string, configuredProfileDirectory
   if (!fs.existsSync(profileConfiguredPath)) {
     const availableProfiles = fs.existsSync(profileRoot)
       ? fs
-          .readdirSync(profileRoot, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && /^(Default|Profile \d+)$/i.test(entry.name))
-          .map((entry) => entry.name)
+        .readdirSync(profileRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^(Default|Profile \d+)$/i.test(entry.name))
+        .map((entry) => entry.name)
       : [];
 
     if (availableProfiles.length > 0) {
@@ -29,7 +29,7 @@ function resolveProfileDirectory(profileRoot: string, configuredProfileDirectory
         : availableProfiles.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
       console.log(
         `[Sesion] Perfil solicitado '${configuredProfileDirectory}' no existe en '${profileRoot}'. ` +
-          `Usando '${profileDirectory}'.`
+        `Usando '${profileDirectory}'.`
       );
     }
   }
@@ -65,14 +65,17 @@ export async function launchPortalSession(
     process.cwd(),
     'artifacts',
     'profiles',
-    'profile-edge-robot',
+    'profile-edge-robot-temp',
   );
-  const profileRoot = process.env.PW_PROFILE_DIR ?? defaultRobotEdgeUserData;
+  const profileSuffix = process.env.PW_EDGE_PROFILE_SUFFIX ?? '';
+  const profileRoot = process.env.PW_PROFILE_DIR ?? (profileSuffix ? path.resolve(process.cwd(), 'artifacts', 'browser-profiles', `profile-edge-robot${profileSuffix}`) : defaultRobotEdgeUserData);
   const configuredProfileDirectory = process.env.PW_CHROME_PROFILE ?? 'Default';
   const profileDirectory = resolveProfileDirectory(profileRoot, configuredProfileDirectory);
   const browserChannel =
     options.browserChannel ??
     ((process.env.PW_BROWSER_CHANNEL as BrowserChannel | undefined) ?? 'msedge');
+
+  const isEdge = browserChannel === 'msedge';
 
   console.log(
     `[Sesion] Browser=${browserChannel} | ProfileRoot=${profileRoot} | ProfileDir=${profileDirectory}`,
@@ -81,8 +84,8 @@ export async function launchPortalSession(
   const launchArgs = [
     '--start-maximized',
     '--window-position=0,0',
-    '--disable-session-crashed-bubble',
     '--no-first-run',
+    ...(isEdge ? ['--edge-skip-compat-layer-relaunch'] : []),
     ...(options.extraArgs ?? []),
   ];
 
@@ -90,13 +93,31 @@ export async function launchPortalSession(
     launchArgs.push(`--profile-directory=${profileDirectory}`);
   }
 
-  const context = await chromium.launchPersistentContext(profileRoot, {
-    channel: browserChannel,
-    headless: false,
-    ignoreHTTPSErrors: true,
-    viewport: null,
-    args: launchArgs,
-  });
+  console.log(`[BrowserSession] Lanzando ${isEdge ? 'Edge' : browserChannel} persistent context`);
+  console.log(`[BrowserSession] browserChannel=${browserChannel}`);
+  console.log(`[BrowserSession] userDataDir=${profileRoot}`);
+  console.log(`[BrowserSession] executablePath=${browserChannel === 'msedge' ? 'msedge (channel)' : 'default'}`);
+  console.log(`[BrowserSession] headless=false`);
+  console.log(`[BrowserSession] args=${JSON.stringify(launchArgs)}`);
+
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profileRoot, {
+      channel: browserChannel,
+      headless: false,
+      ignoreHTTPSErrors: true,
+      viewport: null,
+      args: launchArgs,
+    });
+    console.log('[BrowserSession] Persistent context creado correctamente');
+  } catch (error) {
+    console.error('[BrowserSession] Error al crear persistent context:', error.message);
+    console.error('[BrowserSession] Stack:', error.stack);
+    console.error(`[BrowserSession] userDataDir=${profileRoot}`);
+    console.error(`[BrowserSession] executablePath=default`);
+    console.error(`[BrowserSession] args=${JSON.stringify(launchArgs)}`);
+    throw error;
+  }
   const existingPages = context.pages();
   const page =
     options.preferNewPage
@@ -106,7 +127,7 @@ export async function launchPortalSession(
   await maximizeWindow(page);
 
   if (options.initialUrl) {
-    await page.goto(options.initialUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.goto(options.initialUrl, { waitUntil: 'domcontentloaded' }).catch(() => { });
   }
 
   return {

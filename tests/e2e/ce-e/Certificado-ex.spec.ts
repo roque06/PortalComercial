@@ -62,6 +62,8 @@ import { abrirArchivoAlFinal, limpiarEvidenciasTemporales } from '../../../src/s
 import { closeBrowserSession, runRegistros } from '../../../src/services/common/registroRunner';
 
 const capturas: string[] = [];
+const tasaExcepcionAprobadaEnBizagiPorPage = new WeakSet<Page>();
+const tasaExcepcionSolicitadaPorPage = new WeakMap<Page, string>();
 
 const getBotonContinuar = (page: Page) =>
     page.locator('button:visible').filter({ hasText: /^Continuar\b/i }).last();
@@ -181,7 +183,7 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
 
     const userSels = ['#user', 'input#user', 'input[name="username"]', 'input#username', 'input[autocomplete="username"]'];
     const passSels = ['#password', 'input#password', 'input[type="password"]', 'input[name="password"]'];
-    const btnSels  = ['#btn-login', 'button#btn-login', 'button#btn-adminlogin', 'button:has-text("Ingresar")', 'button[name*="login" i]'];
+    const btnSels = ['#btn-login', 'button#btn-login', 'button#btn-adminlogin', 'button:has-text("Ingresar")', 'button[name*="login" i]'];
 
     const inicioBase = Date.now();
     while (Date.now() - inicioBase < 50000) {
@@ -192,7 +194,7 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
 
         // Detectar si el formulario de login está visible (contraseña Y botón deben estar visibles)
         const inputPassword = await findVisibleLocator(page, passSels, "Password").catch(() => page.locator(passSels[0]).first());
-        const btnIngresar   = await findVisibleLocator(page, btnSels,  "BotonIngresar").catch(() => page.locator(btnSels[0]).first());
+        const btnIngresar = await findVisibleLocator(page, btnSels, "BotonIngresar").catch(() => page.locator(btnSels[0]).first());
 
         const pVis = await inputPassword.isVisible().catch(() => false);
         const iVis = await btnIngresar.isVisible().catch(() => false);
@@ -217,11 +219,11 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
                     sel.value = match.value;
                     sel.dispatchEvent(new Event('input', { bubbles: true }));
                     sel.dispatchEvent(new Event('change', { bubbles: true }));
-                }, BIZAGI_USUARIO).catch(() => {});
-                await page.waitForTimeout(400).catch(() => {});
-                await btnIngresar.click({ force: true }).catch(() => {});
-                await page.waitForLoadState('domcontentloaded').catch(() => {});
-                await page.waitForTimeout(3000).catch(() => {});
+                }, BIZAGI_USUARIO).catch(() => { });
+                await page.waitForTimeout(400).catch(() => { });
+                await btnIngresar.click({ force: true }).catch(() => { });
+                await page.waitForLoadState('domcontentloaded').catch(() => { });
+                await page.waitForTimeout(3000).catch(() => { });
                 if (await esBizagiHomePage(page)) return;
                 continue;
             }
@@ -230,7 +232,7 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
         // Solo proceder si el formulario de login está completo (password + botón visibles)
         if (!pVis || !iVis) {
             console.log(`[BizagiLogin] Formulario de login no detectado (P=${pVis}, Btn=${iVis}). Esperando...`);
-            await page.waitForTimeout(1000).catch(() => {});
+            await page.waitForTimeout(1000).catch(() => { });
             continue;
         }
 
@@ -245,11 +247,11 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
             if (!valU || (!valU.includes("admon") && !valU.includes("domain\\"))) {
                 console.log(`[BizagiLogin] Rellenando usuario...`);
                 await inputUsuario.fill(BIZAGI_USUARIO, { timeout: 5000 }).catch(async () => {
-                    await inputUsuario.evaluate((el, v) => (el as HTMLInputElement).value = v, BIZAGI_USUARIO).catch(() => {});
+                    await inputUsuario.evaluate((el, v) => (el as HTMLInputElement).value = v, BIZAGI_USUARIO).catch(() => { });
                 });
-                await page.waitForTimeout(300).catch(() => {});
+                await page.waitForTimeout(300).catch(() => { });
                 valU = (await inputUsuario.inputValue().catch(() => "")).trim();
-                if (!valU) await inputUsuario.fill(BIZAGI_USUARIO_FALLBACK).catch(() => {});
+                if (!valU) await inputUsuario.fill(BIZAGI_USUARIO_FALLBACK).catch(() => { });
             }
         }
 
@@ -259,9 +261,9 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
         if (!valP) {
             console.log(`[BizagiLogin] Rellenando password...`);
             await inputPassword.fill(BIZAGI_PASSWORD, { timeout: 5000 }).catch(async () => {
-                await inputPassword.evaluate((el, v) => (el as HTMLInputElement).value = v, BIZAGI_PASSWORD).catch(() => {});
+                await inputPassword.evaluate((el, v) => (el as HTMLInputElement).value = v, BIZAGI_PASSWORD).catch(() => { });
             });
-            await page.waitForTimeout(300).catch(() => {});
+            await page.waitForTimeout(300).catch(() => { });
             valP = (await inputPassword.inputValue().catch(() => "")).trim();
         }
 
@@ -270,13 +272,13 @@ async function autocompletarCredencialesBizagiSiLogin(page: Page) {
 
         if (finalP && iVis) {
             console.log(`[BizagiLogin] Ingresando... (U=${!!finalU}, P=${!!finalP})`);
-            await page.waitForTimeout(800).catch(() => {});
+            await page.waitForTimeout(800).catch(() => { });
             if (page.isClosed()) return;
-            await btnIngresar.click({ force: true }).catch(() => {});
-            await page.waitForTimeout(3000).catch(() => {});
+            await btnIngresar.click({ force: true }).catch(() => { });
+            await page.waitForTimeout(3000).catch(() => { });
         } else {
             console.log(`[BizagiLogin] No listo para ingresar. P=${!!finalP}, Btn=${iVis}`);
-            await page.waitForTimeout(1000).catch(() => {});
+            await page.waitForTimeout(1000).catch(() => { });
         }
 
         if (page.isClosed()) return;
@@ -568,12 +570,10 @@ async function solicitarTasaExcepcion(
     }
     console.log("[CERT-EX][TasaExcepcion] Modal Solicitud tasa de excepción visible");
 
-    // Relocalize immediately after detection using dynamic filter to avoid staleness
-    // El .nth(i) guardado se vuelve stale cuando el modal de confirmación se cierra
     console.log("[CERT-EX][TasaExcepcion] Relocalizando modal Solicitud tasa excepción estable");
     const modalEstable = page
         .locator('.p-dialog:visible, [role="dialog"]:visible')
-        .filter({ hasText: /Solicitud tasa de excepción|Motivo de solicitud|Tasa máxima|Tasa solicitada|Tasa pool/i })
+        .filter({ hasText: /Solicitud tasa de excepci[oó]n|Motivo de solicitud|Tasa m[aá]xima|Tasa solicitada|Tasa pool/i })
         .last();
     await modalEstable.waitFor({ state: 'visible', timeout: 15000 });
 
@@ -595,10 +595,10 @@ async function solicitarTasaExcepcion(
                     const input = container.querySelector("input") as HTMLInputElement | null;
                     if (input) {
                         const ariaText = input.getAttribute("aria-valuetext") ?? "";
-                        const ariaNow  = input.getAttribute("aria-valuenow") ?? "";
-                        const valProp  = input.value ?? "";
-                        const valAttr  = input.getAttribute("value") ?? "";
-                        const text     = (container.textContent ?? "").replace("Tasa pool", "").trim();
+                        const ariaNow = input.getAttribute("aria-valuenow") ?? "";
+                        const valProp = input.value ?? "";
+                        const valAttr = input.getAttribute("value") ?? "";
+                        const text = (container.textContent ?? "").replace("Tasa pool", "").trim();
                         const matchTxt = text.match(/\d[\d.,]*%?/)?.[0] ?? "";
                         const resolved = ariaText || ariaNow || valProp || valAttr || matchTxt;
                         if (resolved && /\d/.test(resolved)) return resolved;
@@ -703,7 +703,7 @@ async function solicitarTasaExcepcion(
 
     // Estrategia 1: click normal Playwright
     console.log("[CERT-EX][TasaExcepcion] intento 1: click normal");
-    await botonAceptarSolicitud.click().catch(() => {});
+    await botonAceptarSolicitud.click().catch(() => { });
     await page.waitForTimeout(1000);
     let modalCerrado = !(await modalEstable.isVisible().catch(() => true));
     console.log(`[CERT-EX][TasaExcepcion] modal cerrado tras click normal: ${modalCerrado}`);
@@ -711,7 +711,7 @@ async function solicitarTasaExcepcion(
     if (!modalCerrado) {
         // Estrategia 2: focus + tecla Enter
         console.log("[CERT-EX][TasaExcepcion] intento 2: focus + Enter");
-        await botonAceptarSolicitud.focus().catch(() => {});
+        await botonAceptarSolicitud.focus().catch(() => { });
         await page.waitForTimeout(200);
         await page.keyboard.press("Enter");
         await page.waitForTimeout(1000);
@@ -735,7 +735,7 @@ async function solicitarTasaExcepcion(
     }
 
     // Esperar completamente el cierre del modal de solicitud
-    await modalEstable.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => {});
+    await modalEstable.waitFor({ state: 'hidden', timeout: 15000 }).catch(() => { });
     console.log("[CERT-EX][TasaExcepcion] Modal Solicitud tasa excepción cerrado");
 
     // Modal cerrado confirmado — dar tiempo al DOM para estabilizarse antes de continuar.
@@ -790,6 +790,105 @@ async function extraerMpnSolicitudDesdePortal(page: Page): Promise<string> {
     }
 
     throw new Error("[CRITICO] No se pudo extraer el MPN actual desde Portal Comercial.");
+}
+
+async function estaEnVerificacionesTasaExcepcionEnEspera(page: Page): Promise<boolean> {
+    const verificaciones = await page
+        .getByText(/Verificaciones/i)
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    const tasaExcepcion = await page
+        .getByText(/Tasa de excepci[oó]n/i)
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    const enEspera = await page
+        .getByText(/En espera/i)
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    const mpnVisible = await page
+        .locator('text=/MPN-\\d+/')
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    console.log(
+        `[CERT-EX][Verificaciones][Detect] verificaciones=${verificaciones} tasaExcepcion=${tasaExcepcion} enEspera=${enEspera} mpnVisible=${mpnVisible}`
+    );
+
+    return verificaciones && tasaExcepcion && enEspera && mpnVisible;
+}
+
+async function esperarVerificacionesTasaExcepcion(page: Page): Promise<string> {
+    console.log('[CERT-EX][Verificaciones] Esperando pantalla de Verificaciones');
+
+    await page
+        .getByText(/Verificaciones/i)
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    await page
+        .getByText(/Tasa de excepci[oó]n/i)
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    await page
+        .getByText(/En espera/i)
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    const mpnBadge = page.locator('text=/MPN-\\d+/').first();
+    await mpnBadge.waitFor({ state: 'visible', timeout: 15000 });
+
+    const mpnTexto = (await mpnBadge.innerText()).trim();
+    const mpn = mpnTexto.match(/MPN-\d+/i)?.[0];
+
+    if (!mpn) {
+        throw new Error('[CERT-EX][Verificaciones][CRITICO] No se pudo extraer el MPN');
+    }
+
+    console.log(`[CERT-EX][Verificaciones] Tasa de excepción en espera detectada para ${mpn}`);
+    console.log('[CERT-EX][Verificaciones] Continuando hacia Bizagi');
+
+    return mpn;
+}
+
+async function leerValorTasaSolicitadaDesdeVerificaciones(page: Page): Promise<string> {
+    const valorMemoria = String(tasaExcepcionSolicitadaPorPage.get(page) ?? "").trim();
+    if (valorMemoria) {
+        return valorMemoria;
+    }
+
+    const bloque = page
+        .locator('section, fieldset, .p-card, .card, .p-panel, div')
+        .filter({ hasText: /Tasa de excepci(?:o|\u00f3)n/i })
+        .first();
+
+    const candidatos = [
+        bloque.locator('xpath=//*[contains(normalize-space(.),"Tasa solicitada")]/following::*[self::span or self::div or self::input][1]').first(),
+        bloque.getByText(/Tasa solicitada/i).first().locator('xpath=following::*[self::span or self::div or self::input][1]').first(),
+        page.locator('text=/Tasa solicitada\\s*:?[\\s\\S]*?\\d+[\\d.,]*\\s*%/i').first(),
+    ];
+
+    for (const candidato of candidatos) {
+        const visible = await candidato.isVisible().catch(() => false);
+        if (!visible) continue;
+
+        const valor = ((await candidato.textContent().catch(() => "")) || "").trim();
+        const match = valor.match(/\d+(?:[.,]\d+)?\s*%?/);
+        if (match?.[0]) {
+            const normalizado = match[0].replace(/\s+/g, "");
+            tasaExcepcionSolicitadaPorPage.set(page, normalizado);
+            return normalizado;
+        }
+    }
+
+    throw new Error('[CERT-EX][Verificaciones][CRITICO] No se pudo extraer la tasa solicitada');
 }
 
 async function abrirYAutenticarBizagi(context: BrowserContext): Promise<Page> {
@@ -920,7 +1019,7 @@ async function abrirYAutenticarBizagi(context: BrowserContext): Promise<Page> {
 }
 
 async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
-    console.log(`[TasaExcepcion][Bizagi] buscando caso ${mpn}`);
+    console.log(`[CERT-EX][Bizagi] Buscando caso por MPN=${mpn}`);
 
     // Paso 1: Localizar y usar el buscador superior (menuQuery)
     const selectoresBuscador = [
@@ -938,7 +1037,7 @@ async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
             const input = page.locator(sel).first();
             if (await input.isVisible({ timeout: 2000 }).catch(() => false)) {
                 inputBuscador = input;
-                console.log(`[TasaExcepcion][Bizagi] buscador encontrado: '${sel}'`);
+                console.log(`[CERT-EX][Bizagi] Buscador global localizado: '${sel}'`);
                 break;
             }
         } catch { }
@@ -1021,14 +1120,16 @@ async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
     while (Date.now() - inicio < TIMEOUT_ESPERA) {
         const countMpn = await filasPorMpn.count().catch(() => 0);
         if (countMpn > 0) {
-            console.log(`[TasaExcepcion][Bizagi] fila con ${mpn} encontrada (count=${countMpn})`);
+            console.log(`[CERT-EX][Bizagi] Resultados cargados para ${mpn}`);
+            console.log(`[CERT-EX][Bizagi] Caso de tasa de excepción abierto`);
             capturas.push(await capturarCuentaComoPNG(page, mpn, `bizagi__caso-encontrado`));
             return;
         }
 
         const countActividad = await filasPorActividad.count().catch(() => 0);
         if (countActividad > 0) {
-            console.log(`[TasaExcepcion][Bizagi] fila por actividad encontrada (count=${countActividad})`);
+            console.log(`[CERT-EX][Bizagi] Resultados cargados para ${mpn}`);
+            console.log(`[CERT-EX][Bizagi] Caso de tasa de excepción abierto`);
             return;
         }
 
@@ -1051,7 +1152,96 @@ async function buscarCasoBizagi(page: Page, mpn: string): Promise<void> {
     throw new Error(`[CRITICO] Bizagi no devolvio resultados para ${mpn}.`);
 }
 
+async function buscarCasoBizagiForzado(page: Page, mpn: string): Promise<void> {
+    console.log(`[CERT-EX][Bizagi] Buscando caso por MPN=${mpn}`);
+
+    const selectoresBuscador = [
+        'input#menuQuery',
+        'input[placeholder*="Buscar" i]',
+        'input[type="search"]',
+        'input[aria-label*="Buscar" i]',
+        '.search input',
+        '#ui-bizagi-wp-widget-searchContainer input',
+        'input[id*="menuQuery"]',
+        'input[name="menuQuery"]',
+        '#menuQuery',
+    ];
+
+    let inputBuscador: Locator | null = null;
+    for (const sel of selectoresBuscador) {
+        const input = page.locator(sel).first();
+        if (await input.isVisible().catch(() => false)) {
+            inputBuscador = input;
+            console.log('[CERT-EX][Bizagi] Buscador global localizado');
+            break;
+        }
+    }
+
+    if (!inputBuscador) {
+        throw new Error(`[CRITICO] Bizagi: no se pudo localizar el buscador superior.`);
+    }
+
+    await inputBuscador.scrollIntoViewIfNeeded().catch(() => { });
+    await inputBuscador.click({ force: true }).catch(() => { });
+    await inputBuscador.press("Control+A").catch(() => { });
+    await inputBuscador.press("Delete").catch(() => { });
+    await inputBuscador.fill(mpn).catch(async () => {
+        await inputBuscador!.pressSequentially(mpn, { delay: 40 }).catch(() => { });
+    });
+    await inputBuscador.press("Enter").catch(() => { });
+    await page.keyboard.press("Enter").catch(() => { });
+
+    const actividadRegex = /Gesti(?:o|\u00f3)n Autorizaci(?:o|\u00f3)n Tasa de Excepci(?:o|\u00f3)n|Autorizaci(?:o|\u00f3)n Tasa de Excepci(?:o|\u00f3)n/i;
+    const filasResultados = page
+        .locator('tr, [role="row"], .p-datatable-row, .grid-row, .bpm-grid-row, .ui-bizagi-wp-widget-inbox-grid-cases-row')
+        .filter({ hasText: new RegExp(mpn, 'i') })
+        .filter({ hasText: actividadRegex });
+
+    await filasResultados.first().waitFor({ state: "visible", timeout: 30000 });
+    console.log(`[CERT-EX][Bizagi] Resultados cargados para ${mpn}`);
+
+    const filaCaso = filasResultados.first();
+    const linkCaso = filaCaso.getByRole('link').first();
+    if (await linkCaso.isVisible().catch(() => false)) {
+        await linkCaso.click({ force: true });
+    } else {
+        await filaCaso.click({ force: true });
+    }
+    console.log('[CERT-EX][Bizagi] Caso de tasa de excepción abierto');
+
+    const validacionesPantalla = [
+        page.getByText(/Solicitar Aclaraciones/i).first(),
+        page.getByText(/Tasa de Excepci(?:o|\u00f3)n/i).first(),
+        page.getByText(/Tasa Recomendada/i).first(),
+        page.getByText(/Tasa Aprobada/i).first(),
+        page.getByRole('button', { name: /Siguiente/i }).first(),
+    ];
+
+    const inicioValidacion = Date.now();
+    while (Date.now() - inicioValidacion < 20000) {
+        for (const locator of validacionesPantalla) {
+            if (await locator.isVisible().catch(() => false)) {
+                console.log('[CERT-EX][Bizagi] Pantalla de aprobación tasa de excepción visible');
+                capturas.push(await capturarCuentaComoPNG(page, mpn, `bizagi__caso-encontrado`));
+                return;
+            }
+        }
+        await page.waitForTimeout(400);
+    }
+
+    throw new Error(`[CRITICO] Bizagi no abrió la pantalla de aprobación para ${mpn}.`);
+}
+
 async function abrirCasoGestionAutorizacionTasaExcepcion(page: Page, mpn: string): Promise<void> {
+    const yaEnAprobacion =
+        (await page.getByText(/Solicitar Aclaraciones/i).first().isVisible().catch(() => false)) ||
+        (await page.getByText(/Tasa de Excepci(?:o|\u00f3)n/i).first().isVisible().catch(() => false)) ||
+        (await page.getByRole('button', { name: /Siguiente/i }).first().isVisible().catch(() => false));
+    if (yaEnAprobacion) {
+        console.log('[CERT-EX][Bizagi] Pantalla de aprobación ya estaba abierta');
+        return;
+    }
+
     const REGEX_ACTIVIDAD = /Gesti(?:o|\u00f3)n Autorizaci(?:o|\u00f3)n Tasa de Excepci(?:o|\u00f3)n/i;
 
     // Intentar primero con MPN en la fila (más preciso)
@@ -1097,134 +1287,467 @@ async function abrirCasoGestionAutorizacionTasaExcepcion(page: Page, mpn: string
 }
 
 async function completarAprobacionTasaBizagi(page: Page, valorTasa: string, paso: 1 | 2): Promise<void> {
-    // 1) Solicitar aclaraciones -> No
-    const bloqueAclaraciones = page
-        .locator('xpath=//*[contains(normalize-space(.),"Solicitar Aclaraciones")]/ancestor::*[self::div or self::section or self::fieldset][1]')
-        .first();
-    await bloqueAclaraciones.waitFor({ state: "visible", timeout: 20000 });
+    console.log(`[CERT-EX][Bizagi][Aprobacion] URL actual=${page.url()}`);
+    console.log(`[CERT-EX][Bizagi][Aprobacion] Iniciando paso=${ paso}`);
 
-    const opcionNo = bloqueAclaraciones.getByLabel(/No/i).first();
-    if (await opcionNo.isVisible().catch(() => false)) {
-        await opcionNo.check({ force: true }).catch(async () => {
-            await opcionNo.click({ force: true }).catch(() => { });
-        });
-        const checked = await opcionNo.isChecked().catch(() => false);
-        if (!checked) {
-            throw new Error(`[CRITICO] No se pudo seleccionar 'No' en Solicitar Aclaraciones (paso ${paso}).`);
+    if (/about:blank|portalcomercial|requests\/create\/multiproduct/i.test(page.url())) {
+        throw new Error(`[CERT-EX][Bizagi][Aprobacion][CRITICO] Page incorrecta para aprobar tasa. URL=${page.url()}`);
+    }
+
+    await page.bringToFront().catch(() => { });
+    await page.waitForTimeout(700);
+
+    const menuQuery = page.locator('input#menuQuery, input[name="menuQuery"]').first();
+    if (await menuQuery.isVisible().catch(() => false)) {
+        const menuValue = await menuQuery.inputValue().catch(() => '');
+        if (/^\s*8([.,]00)?\s*$/.test(menuValue)) {
+            console.log('[CERT-EX][Bizagi][Aprobacion] Limpiando valor incorrecto en menuQuery');
+            await menuQuery.fill('').catch(() => {});
+            await menuQuery.press('Escape').catch(() => {});
         }
-    } else {
-        const labelNo = bloqueAclaraciones.locator('label:has-text("No")').first();
-        await labelNo.click({ force: true }).catch(() => { });
     }
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} solicitar aclaraciones=no`);
 
-    // 2) Secci?n Tasa de Excepci?n (contenedor)
-    const seccionTasa = page
-        .locator('xpath=//*[self::div or self::section or self::fieldset or self::table][.//*[contains(normalize-space(.),"Tasa de ExcepciÃ³n") or contains(normalize-space(.),"Tasa de Excepci")]]')
+    let tasaAprobada = String(valorTasa ?? '').trim();
+    tasaAprobada = tasaAprobada.replace(',', '.');
+
+    if (!tasaAprobada || !/\d/.test(tasaAprobada)) {
+        tasaAprobada = '8.00';
+    }
+
+    if (/^\d+$/.test(tasaAprobada)) {
+        tasaAprobada = `${tasaAprobada}.00`;
+    }
+
+    if (/^8(?:\.0+)?$/.test(tasaAprobada)) {
+        tasaAprobada = '8.00';
+    }
+
+    const btnGuardarReady = page
+        .locator('input#formButton0[value="Guardar"]:visible, input[type="button"][value="Guardar"]:visible')
         .first();
-    await seccionTasa.waitFor({ state: "visible", timeout: 20000 });
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} secciÃ³n tasa excepciÃ³n localizada`);
 
-    // 3) Input Tasa Recomendada / Aprobada por XPath exacto
-    const inputTasaAprobada = page
-        .locator('xpath=//*[@id="M_VerifTasa_xProdVerifTasa"]/div/div[2]/div[1]/table/tbody/tr/td[12]/div/div/span/input')
+    const btnSiguienteReady = page
+        .locator('input#formButton1[value="Siguiente"]:visible, input[type="button"][value="Siguiente"]:visible')
         .first();
-    await inputTasaAprobada.waitFor({ state: "visible", timeout: 15000 });
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} input tasa localizado por xpath`);
-    if (paso === 1) {
-        capturas.push(await capturarCuentaComoPNG(page, 'bizagi', `tasa-excepcion__paso-1-input`, { skipSpinnerWait: true }));
+
+    await btnGuardarReady.waitFor({ state: 'visible', timeout: 20000 });
+    await btnSiguienteReady.waitFor({ state: 'visible', timeout: 20000 });
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Pantalla lista por botones Guardar/Siguiente');
+
+    const filaTasa = page
+        .locator('tr:visible')
+        .filter({
+            hasText: /300\s*-\s*Dep[oó]sito a plazo|Personal Capitalizable DOP|8\.00|8\.00%|5\.82%/i,
+        })
+        .last();
+
+    await filaTasa.waitFor({ state: 'visible', timeout: 30000 });
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Fila de tasa localizada');
+
+    const celdasTd = filaTasa.locator('td:visible');
+    const totalTd = await celdasTd.count().catch(() => 0);
+
+    console.log(`[CERT-EX][Bizagi][Aprobacion] TD visibles fila tasa=${totalTd}`);
+
+    for (let i = 0; i < totalTd; i++) {
+        const txt = await celdasTd.nth(i).innerText().catch(() => '');
+        console.log(`[CERT-EX][Bizagi][Aprobacion] TD[${i}]=${txt.replace(/\s+/g, ' ').trim()}`);
     }
 
-    await inputTasaAprobada.scrollIntoViewIfNeeded().catch(() => { });
-    await inputTasaAprobada.click({ force: true }).catch(() => { });
-    await inputTasaAprobada.press("Control+A").catch(() => { });
-    await inputTasaAprobada.press("Delete").catch(() => { });
-    await inputTasaAprobada.fill(valorTasa).catch(() => { });
-
-    let valorFinal = (await inputTasaAprobada.inputValue().catch(() => "")).trim();
-    if (!tasaCoincide(valorFinal, valorTasa)) {
-        await inputTasaAprobada.click({ force: true }).catch(() => { });
-        await inputTasaAprobada.press("Control+A").catch(() => { });
-        await inputTasaAprobada.press("Delete").catch(() => { });
-        await inputTasaAprobada.pressSequentially(valorTasa, { delay: 40 }).catch(() => { });
-        valorFinal = (await inputTasaAprobada.inputValue().catch(() => "")).trim();
+    if (totalTd < 9) {
+        throw new Error(`[CERT-EX][Bizagi][Aprobacion][CRITICO] No hay suficientes TD visibles en la fila de tasa. totalTd=${totalTd}`);
     }
-    if (!tasaCoincide(valorFinal, valorTasa)) {
-        throw new Error(`[CRITICO] No se pudo escribir la tasa recomendada/aprobada. esperado='${valorTasa}' actual='${valorFinal}'`);
-    }
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} tasa aprobada='${valorFinal}'`);
 
-    // 4) Seleccionar S? en columna Aprobaci?n dentro de la misma fila
-    const filaAprobacion = inputTasaAprobada.locator('xpath=ancestor::tr[1]');
-    let opcionSi = inputTasaAprobada
-        .locator('xpath=ancestor::td[1]/following-sibling::td[1]//input[@type="radio" and @value="true"]')
+    let indexTasaAprobada = 7;
+    let indexAprobacion = 8;
+
+    if (totalTd >= 11) {
+        indexTasaAprobada = 8;
+        indexAprobacion = 9;
+    }
+
+    console.log(`[CERT-EX][Bizagi][Aprobacion] indexTasaAprobada=${indexTasaAprobada} indexAprobacion=${indexAprobacion}`);
+
+    const celdaTasaAprobada = celdasTd.nth(indexTasaAprobada);
+    const celdaAprobacion = celdasTd.nth(indexAprobacion);
+
+    await celdaTasaAprobada.waitFor({ state: 'visible', timeout: 10000 });
+    await celdaAprobacion.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Celda Tasa Recomendada / Aprobada localizada');
+    console.log('[CERT-EX][Bizagi][Aprobacion] Celda Aprobación localizada');
+
+    async function obtenerEditorNumericoSeguro(page: Page, celda: Locator): Promise<Locator | null> {
+        const editorDentroCelda = celda
+            .locator('input.ui-bizagi-render-numeric:visible:not([readonly]):not([disabled])')
+            .first();
+
+        if (await editorDentroCelda.isVisible().catch(() => false)) {
+            return editorDentroCelda;
+        }
+
+        const candidatos = page.locator(
+            'input.ui-bizagi-render-numeric:visible:not([readonly]):not([disabled])'
+        );
+
+        const total = await candidatos.count().catch(() => 0);
+        const boxCelda = await celda.boundingBox().catch(() => null);
+
+        for (let i = 0; i < total; i++) {
+            const candidato = candidatos.nth(i);
+
+            const id = await candidato.getAttribute('id').catch(() => '');
+            const name = await candidato.getAttribute('name').catch(() => '');
+            const placeholder = await candidato.getAttribute('placeholder').catch(() => '');
+            const cls = await candidato.getAttribute('class').catch(() => '');
+
+            if (/menuQuery|Buscar/i.test(`${id} ${name} ${placeholder}`)) {
+                continue;
+            }
+
+            if (!/ui-bizagi-render-numeric/i.test(cls || '')) {
+                continue;
+            }
+
+            if (boxCelda) {
+                const boxInput = await candidato.boundingBox().catch(() => null);
+
+                if (boxInput) {
+                    const cx = boxInput.x + boxInput.width / 2;
+                    const cy = boxInput.y + boxInput.height / 2;
+
+                    const dentro =
+                        cx >= boxCelda.x - 30 &&
+                        cx <= boxCelda.x + boxCelda.width + 30 &&
+                        cy >= boxCelda.y - 30 &&
+                        cy <= boxCelda.y + boxCelda.height + 30;
+
+                    if (!dentro) {
+                        continue;
+                    }
+                }
+            }
+
+            return candidato;
+        }
+
+        return null;
+    }
+
+    async function llenarCeldaGridBizagi(celda: Locator, valor: string, nombre: string): Promise<void> {
+        console.log(`[CERT-EX][Bizagi][Aprobacion] Activando celda ${nombre}`);
+
+        await celda.scrollIntoViewIfNeeded().catch(() => { });
+        await celda.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(300);
+
+        await celda.dblclick({ force: true }).catch(() => { });
+        await page.waitForTimeout(500);
+
+        let editor = await obtenerEditorNumericoSeguro(page, celda);
+
+        if (editor) {
+            const id = await editor.getAttribute('id').catch(() => '');
+            const name = await editor.getAttribute('name').catch(() => '');
+            const placeholder = await editor.getAttribute('placeholder').catch(() => '');
+            const cls = await editor.getAttribute('class').catch(() => '');
+
+            console.log(`[CERT-EX][Bizagi][Aprobacion] Editor candidato id=${id} name=${name} placeholder=${placeholder} class=${cls}`);
+
+            if (/menuQuery|Buscar/i.test(`${id} ${name} ${placeholder}`)) {
+                throw new Error('[CERT-EX][Bizagi][Aprobacion][CRITICO] El editor resuelto es menuQuery; se aborta para no llenar el buscador');
+            }
+
+            await editor.click({ force: true });
+            await editor.press('Control+A').catch(() => { });
+            await editor.press('Delete').catch(() => { });
+
+            await editor.fill(valor).catch(async () => {
+                await editor.pressSequentially(valor, { delay: 30 });
+            });
+
+            await editor.evaluate((el: Element) => {
+                const input = el as HTMLInputElement;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.dispatchEvent(new Event('blur', { bubbles: true }));
+            }).catch(() => { });
+
+            await editor.press('Tab').catch(() => { });
+            await page.waitForTimeout(700);
+
+            const value = await editor.inputValue().catch(() => '');
+            console.log(`[CERT-EX][Bizagi][Aprobacion] ${nombre} valor editor=${value}`);
+
+            const menuValueFinal = await menuQuery.inputValue().catch(() => '');
+            if (/^\s*8([.,]00)?\s*$/.test(menuValueFinal)) {
+                throw new Error('[CERT-EX][Bizagi][Aprobacion][CRITICO] La tasa fue escrita en menuQuery, no en la celda');
+            }
+
+            if (!/8([.,]00)?/.test(value)) {
+                throw new Error(`[CERT-EX][Bizagi][Aprobacion][CRITICO] No se llenó correctamente ${nombre}. value=${value}`);
+            }
+
+            return;
+        }
+
+        console.log(`[CERT-EX][Bizagi][Aprobacion] Sin editor numérico seguro; usando teclado sobre celda ${nombre}`);
+
+        await celda.click({ force: true });
+        await page.waitForTimeout(300);
+
+        const activeInfo = await page.evaluate(() => {
+            const el = document.activeElement as HTMLElement | null;
+            return {
+                tag: el?.tagName ?? '',
+                id: el?.id ?? '',
+                name: el?.getAttribute('name') ?? '',
+                placeholder: el?.getAttribute('placeholder') ?? '',
+                cls: el?.className?.toString() ?? ''
+            };
+        });
+
+        console.log(`[CERT-EX][Bizagi][Aprobacion] activeElement antes teclado=${JSON.stringify(activeInfo)}`);
+
+        if (/menuQuery|Buscar/i.test(`${activeInfo.id} ${activeInfo.name} ${activeInfo.placeholder}`)) {
+            throw new Error('[CERT-EX][Bizagi][Aprobacion][CRITICO] El foco está en menuQuery; no se escribirá la tasa');
+        }
+
+        await page.keyboard.press('Control+A').catch(() => { });
+        await page.keyboard.press('Backspace').catch(() => { });
+        await page.keyboard.type(valor, { delay: 35 });
+        await page.keyboard.press('Tab').catch(() => { });
+        await page.waitForTimeout(900);
+
+        const textoCelda = await celda.innerText().catch(() => '');
+        console.log(`[CERT-EX][Bizagi][Aprobacion] ${nombre} texto celda después=${textoCelda}`);
+    }
+
+    await llenarCeldaGridBizagi(celdaTasaAprobada, tasaAprobada, 'Tasa Recomendada / Aprobada');
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Tasa aprobada llenada/intento completado');
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Seleccionando aprobación Sí');
+
+    let seleccionadoSi = false;
+
+    const radioSiInput = celdaAprobacion
+        .locator('input[type="radio"][value="true"], input.ui-bizagi-render-boolean-radio[value="true"]')
         .first();
-    if (!(await opcionSi.isVisible().catch(() => false))) {
-        opcionSi = inputTasaAprobada
-            .locator('xpath=ancestor::td[1]/following-sibling::td[1]//label[contains(normalize-space(.),"Si") or contains(normalize-space(.),"SÃ­")]')
+
+    if (await radioSiInput.count().then(c => c > 0).catch(() => false)) {
+        const id = await radioSiInput.getAttribute('id').catch(() => '');
+        console.log(`[CERT-EX][Bizagi][Aprobacion] Radio Sí input encontrado id=${id}`);
+
+        const label = id ? page.locator(`label[for="${id}"]`).first() : null;
+
+        if (label && await label.isVisible().catch(() => false)) {
+            await label.click({ force: true });
+            seleccionadoSi = true;
+        } else {
+            await radioSiInput.click({ force: true }).catch(async () => {
+                await radioSiInput.evaluate((el: Element) => {
+                    const input = el as HTMLInputElement;
+                    input.checked = true;
+                    input.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                }).catch(() => { });
+            });
+            seleccionadoSi = true;
+        }
+    }
+
+    if (!seleccionadoSi) {
+        const radioVisualSi = celdaAprobacion.locator('.ui-radio').first();
+
+        if (await radioVisualSi.isVisible().catch(() => false)) {
+            const box = await radioVisualSi.boundingBox().catch(() => null);
+            console.log(`[CERT-EX][Bizagi][Aprobacion] Radio visual Sí box=${JSON.stringify(box)}`);
+            await radioVisualSi.click({ force: true });
+            seleccionadoSi = true;
+        }
+    }
+
+    if (!seleccionadoSi) {
+        const box = await celdaAprobacion.boundingBox().catch(() => null);
+
+        if (box) {
+            await page.mouse.click(box.x + 18, box.y + box.height / 2);
+            seleccionadoSi = true;
+        }
+    }
+
+    if (!seleccionadoSi) {
+        throw new Error('[CERT-EX][Bizagi][Aprobacion][CRITICO] No se pudo seleccionar aprobación Sí');
+    }
+
+    await page.waitForTimeout(700);
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Aprobación Sí seleccionada/intento completado');
+
+    const observacion = 'Aprobado por automatizacion';
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Llenando Observaciones');
+
+    let campoObservaciones = page
+        .locator('xpath=//*[normalize-space()="Observaciones"]/following::textarea[1] | //*[normalize-space()="Observaciones"]/following::input[not(@readonly) and not(@disabled)][1]')
+        .first();
+
+    if (!(await campoObservaciones.isVisible().catch(() => false))) {
+        campoObservaciones = page
+            .locator('input.ui-bizagi-render-text:visible:not([readonly]):not([disabled]), textarea:visible:not([readonly]):not([disabled])')
+            .last();
+    }
+
+    await campoObservaciones.waitFor({ state: 'visible', timeout: 10000 });
+    await campoObservaciones.scrollIntoViewIfNeeded().catch(() => { });
+    await campoObservaciones.click({ force: true }).catch(() => { });
+    await campoObservaciones.press('Control+A').catch(() => { });
+    await campoObservaciones.press('Delete').catch(() => { });
+
+    await campoObservaciones.fill(observacion).catch(async () => {
+        await campoObservaciones.pressSequentially(observacion, { delay: 25 });
+    });
+
+    await campoObservaciones.evaluate((el: Element) => {
+        const input = el as HTMLInputElement | HTMLTextAreaElement;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+    }).catch(() => { });
+
+    await campoObservaciones.press('Tab').catch(() => { });
+    await page.waitForTimeout(500);
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Observaciones llenadas/intento completado');
+
+    let btnGuardar = page
+        .locator('input#formButton0[value="Guardar"]:visible')
+        .first();
+
+    if (!(await btnGuardar.isVisible().catch(() => false))) {
+        btnGuardar = page
+            .locator('input[type="button"][value="Guardar"]:visible')
             .first();
     }
-    if (!(await opcionSi.isVisible().catch(() => false))) {
-        opcionSi = filaAprobacion.locator('input[type="radio"][value="true"]').first();
-    }
-    if (!(await opcionSi.isVisible().catch(() => false))) {
-        opcionSi = filaAprobacion.locator('label:has-text("Si"), label:has-text("SÃ­")').first();
-    }
-    if (!(await opcionSi.isVisible().catch(() => false))) {
-        opcionSi = filaAprobacion.locator('input[type="radio"]').first();
+
+    await btnGuardar.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log('[CERT-EX][Bizagi][Aprobacion] Click Guardar');
+    await btnGuardar.click({ force: true });
+
+    await page.waitForTimeout(2500);
+
+    let btnSiguiente = page
+        .locator('input#formButton1[value="Siguiente"]:visible')
+        .first();
+
+    if (!(await btnSiguiente.isVisible().catch(() => false))) {
+        btnSiguiente = page
+            .locator('input[type="button"][value="Siguiente"]:visible')
+            .first();
     }
 
-    if (await opcionSi.isVisible().catch(() => false)) {
-        await opcionSi.click({ force: true }).catch(() => { });
-    }
+    await btnSiguiente.waitFor({ state: 'visible', timeout: 15000 });
 
-    const marcado = await filaAprobacion.locator('input[type="radio"]:checked').first().isVisible().catch(() => false);
-    if (!marcado) {
-        throw new Error(`[CRITICO] No se pudo seleccionar 'Si' en aprobaci?n Bizagi (paso ${paso}).`);
-    }
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} aprobaciÃ³n=si`);
-
-    // 5) Guardar antes de Siguiente (Bizagi requiere guardar primero)
-    const btnGuardar = page.getByRole("button", { name: /^Guardar$/i }).first();
-    if (await btnGuardar.isVisible().catch(() => false)) {
-        console.log(`[TasaExcepcion][Bizagi] paso ${paso} clickeando Guardar`);
-        await btnGuardar.click({ force: true }).catch(() => { });
-        await page.waitForTimeout(1500);
-    }
-
-    // 6) Siguiente
-    const btnSiguiente = page.getByRole("button", { name: /Siguiente/i }).first();
-    await btnSiguiente.waitFor({ state: "visible", timeout: 15000 });
-    const btnEnabled = await btnSiguiente.isEnabled().catch(() => false);
-    if (!btnEnabled) {
-        throw new Error(`[CRITICO] Botón 'Siguiente' no disponible en Bizagi (paso ${paso}).`);
-    }
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} clickeando Siguiente`);
+    console.log('[CERT-EX][Bizagi][Aprobacion] Click Siguiente');
     await btnSiguiente.click({ force: true });
-    await page.waitForTimeout(1500);
 
-    // Verificar que la acción avanzó (el input debería desaparecer o la URL cambiar)
-    const inputSigueVisible = await inputTasaAprobada.isVisible().catch(() => false);
-    if (inputSigueVisible) {
-        // Reintentar con JS click
-        console.log(`[TasaExcepcion][Bizagi] paso ${paso} Siguiente no navegó, reintentando con JS click`);
-        await btnSiguiente.evaluate((el: HTMLElement) => el.click()).catch(() => { });
-        await page.waitForTimeout(2000);
-    }
-    console.log(`[TasaExcepcion][Bizagi] paso ${paso} Siguiente ejecutado`);
+    console.log('[CERT-EX][Bizagi][Aprobacion] Aprobación enviada');
 }
 
 async function aprobarExcepcionTasaBizagi(context: BrowserContext, mpn: string, valorTasa: string): Promise<void> {
     const bizagiPage = await abrirYAutenticarBizagi(context);
-    await buscarCasoBizagi(bizagiPage, mpn);
-    await abrirCasoGestionAutorizacionTasaExcepcion(bizagiPage, mpn);
+    await buscarCasoBizagiForzado(bizagiPage, mpn);
+    console.log('[CERT-EX][Bizagi] Iniciando completarAprobacionTasaBizagi paso=1');
     await completarAprobacionTasaBizagi(bizagiPage, valorTasa, 1);
-    const inputTasaPaso2 = bizagiPage
-        .locator('xpath=//*[@id="M_VerifTasa_xProdVerifTasa"]/div/div[2]/div[1]/table/tbody/tr/td[12]/div/div/span/input')
-        .first();
-    await inputTasaPaso2.waitFor({ state: "detached", timeout: 15000 }).catch(() => { });
-    await inputTasaPaso2.waitFor({ state: "visible", timeout: 20000 });
+    await bizagiPage.waitForTimeout(2500);
+
+    await bizagiPage
+        .locator('input#formButton0[value="Guardar"]:visible, input[type="button"][value="Guardar"]:visible')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    await bizagiPage
+        .locator('input#formButton1[value="Siguiente"]:visible, input[type="button"][value="Siguiente"]:visible')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    console.log('[CERT-EX][Bizagi] Iniciando completarAprobacionTasaBizagi paso=2');
     await completarAprobacionTasaBizagi(bizagiPage, valorTasa, 2);
+}
+
+async function finalizarPortalTrasAprobacionTasaExcepcion(
+    page: Page,
+    valorTasa: string,
+    registro?: RegistroExcel
+): Promise<void> {
+    await page.bringToFront().catch(() => { });
+    await page.reload({ waitUntil: "domcontentloaded" }).catch(() => { });
+
+    const verifHeader = page.getByText(/Verificaciones/i).first();
+    await verifHeader.waitFor({ state: "visible", timeout: 20000 });
+    await esperarEstadoAprobadoTasaEnPortal(page, valorTasa);
+    console.log("[TasaExcepcion][Portal] estado aprobado detectado");
+
+    if (registro) {
+        capturas.push(await capturarCuentaComoPNG(page, registro.identificacion, `${registro.tipoCuenta}__tasa-aprobada`, { skipSpinnerWait: true }));
+    }
+
+    const btnContinuarPostAprobacion = getBotonContinuar(page);
+    await btnContinuarPostAprobacion.waitFor({ state: "visible", timeout: 15000 });
+    await btnContinuarPostAprobacion.click({ force: true });
+    console.log("[TasaExcepcion][Portal] continuando flujo tras aprobación");
+    await esperarFinActualizandoSolicitud(page, 30000).catch(() => false);
+}
+
+async function saltarABizagiSiTasaEnEspera(page: Page): Promise<boolean> {
+    const debeSaltar = await estaEnVerificacionesTasaExcepcionEnEspera(page);
+
+    if (!debeSaltar) {
+        return false;
+    }
+
+    if (tasaExcepcionAprobadaEnBizagiPorPage.has(page)) {
+        console.log('[CERT-EX][Verificaciones] Tasa en espera ya fue enviada a Bizagi en este flujo');
+        return true;
+    }
+
+    console.log('[CERT-EX][Verificaciones] Tasa en espera detectada; iniciando salto forzado a Bizagi');
+
+    const mpn = await esperarVerificacionesTasaExcepcion(page);
+    const valorTasa = await leerValorTasaSolicitadaDesdeVerificaciones(page);
+
+    console.log(`[CERT-EX][Bizagi] Abriendo Bizagi para MPN=${mpn}`);
+
+    const bizagiPage = await abrirYAutenticarBizagi(page.context());
+    await buscarCasoBizagiForzado(bizagiPage, mpn);
+    console.log('[CERT-EX][Bizagi] Iniciando completarAprobacionTasaBizagi paso=1');
+    await completarAprobacionTasaBizagi(bizagiPage, valorTasa, 1);
+
+    await bizagiPage.waitForTimeout(2500);
+
+    await bizagiPage
+        .locator('input#formButton0[value="Guardar"]:visible, input[type="button"][value="Guardar"]:visible')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    await bizagiPage
+        .locator('input#formButton1[value="Siguiente"]:visible, input[type="button"][value="Siguiente"]:visible')
+        .first()
+        .waitFor({ state: 'visible', timeout: 30000 });
+
+    console.log('[CERT-EX][Bizagi] Iniciando completarAprobacionTasaBizagi paso=2');
+    await completarAprobacionTasaBizagi(bizagiPage, valorTasa, 2);
+
+    tasaExcepcionAprobadaEnBizagiPorPage.add(page);
+    console.log('[CERT-EX][Bizagi] Flujo de aprobación tasa completado o iniciado correctamente');
+
+    return true;
 }
 
 async function esperarEstadoAprobadoTasaEnPortal(page: Page, valorTasa: string): Promise<void> {
@@ -1275,6 +1798,21 @@ async function procesarAprobacionExcepcionTasaSiAplica(
         return;
     }
 
+    const valorTasa = String(registro.valorTasa ?? "").trim();
+    if (valorTasa) {
+        tasaExcepcionSolicitadaPorPage.set(page, valorTasa);
+    }
+
+    if (tasaExcepcionAprobadaEnBizagiPorPage.has(page)) {
+        await finalizarPortalTrasAprobacionTasaExcepcion(page, valorTasa, registro);
+        return;
+    }
+
+    if (await saltarABizagiSiTasaEnEspera(page)) {
+        await finalizarPortalTrasAprobacionTasaExcepcion(page, valorTasa, registro);
+        return;
+    }
+
     console.log("[TasaExcepcion][Portal] excepci?n solicitada; esperando salida del modal");
 
     const dialogoCertificado = page
@@ -1315,6 +1853,11 @@ async function procesarAprobacionExcepcionTasaSiAplica(
 
     await esperarFinActualizandoSolicitud(page, 30000).catch(() => false);
 
+    if (await saltarABizagiSiTasaEnEspera(page)) {
+        await finalizarPortalTrasAprobacionTasaExcepcion(page, valorTasa, registro);
+        return;
+    }
+
     const verifHeader = page.getByText(/Verificaciones/i).first();
     await verifHeader.waitFor({ state: "visible", timeout: 20000 });
     console.log("[TasaExcepcion][Portal] pantalla Verificaciones detectada");
@@ -1341,10 +1884,18 @@ async function procesarAprobacionExcepcionTasaSiAplica(
         throw new Error("[CRITICO] No se detectÃ³ estado En espera para Tasa de excepciÃ³n.");
     }
 
+    if (await saltarABizagiSiTasaEnEspera(page)) {
+        await finalizarPortalTrasAprobacionTasaExcepcion(page, valorTasa, registro);
+        return;
+    }
+
     const mpn = await extraerMpnSolicitudDesdePortal(page);
     console.log(`[TasaExcepcion][Portal] mpn detectado='${mpn}'`);
 
-    await aprobarExcepcionTasaBizagi(context, mpn, String(registro.valorTasa ?? "").trim());
+    await aprobarExcepcionTasaBizagi(context, mpn, valorTasa);
+    tasaExcepcionAprobadaEnBizagiPorPage.add(page);
+    await finalizarPortalTrasAprobacionTasaExcepcion(page, valorTasa, registro);
+    return;
 
     await page.bringToFront().catch(() => { });
     await page.reload({ waitUntil: "domcontentloaded" }).catch(() => { });
@@ -1581,6 +2132,11 @@ async function validarNoCancelarProcesoModal(page: Page) {
 }
 
 async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
+    if (await estaEnVerificacionesTasaExcepcionEnEspera(page)) {
+        console.log('[CERT-EX][Guard] Verificaciones con tasa en espera detectada; se omiten esperas globales');
+        return true;
+    }
+
     const EARLY_EXIT_CHECK_MS = 1500; // Verificar tempranamente si el texto aparece
 
     const txtActualizando = page.getByText(/Actualizando solicitud/i).first();
@@ -1592,6 +2148,11 @@ async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
     // Early exit check: si "Actualizando solicitud" no aparece en los primeros 1500ms, salir inmediatamente
     const earlyCheckStart = Date.now();
     while (Date.now() - earlyCheckStart < EARLY_EXIT_CHECK_MS) {
+        if (await estaEnVerificacionesTasaExcepcionEnEspera(page)) {
+            console.log('[CERT-EX][Guard] Verificaciones con tasa en espera detectada dentro del loop; se corta espera');
+            return true;
+        }
+
         const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
         const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
         const overlayCount = await overlays.count().catch(() => 0);
@@ -1614,6 +2175,11 @@ async function esperarFinActualizandoSolicitud(page: Page, timeoutMs = 120000) {
     // Si llegamos aquí, el spinner SÍ apareció. Esperar a que desaparezca.
     const mainWaitStart = Date.now();
     while (Date.now() - mainWaitStart < timeoutMs) {
+        if (await estaEnVerificacionesTasaExcepcionEnEspera(page)) {
+            console.log('[CERT-EX][Guard] Verificaciones con tasa en espera detectada dentro del loop; se corta espera');
+            return true;
+        }
+
         await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
         const actualizandoVisible = await txtActualizando.isVisible().catch(() => false);
         const depurandoVisible = await txtDepurando.isVisible().catch(() => false);
@@ -2068,7 +2634,7 @@ async function adjuntarDocumentoYFinalizarSolicitud(page: Page): Promise<void> {
         const contentVisible = await panelContent.isVisible().catch(() => false);
         if (!contentVisible) {
             console.log(`[FinalizarSolicitud] Expandiendo panel ${pi + 1}`);
-            await hdr.click({ force: true }).catch(() => {});
+            await hdr.click({ force: true }).catch(() => { });
             await page.waitForTimeout(600);
         }
     }
@@ -3086,7 +3652,7 @@ async function esperarUrlRequestEditEstableCert(page: Page, contexto: string) {
         console.log(`[CERT-EX][WaitRequestEdit] contexto=${contexto} url=${url} enCreate=${enCreate} enEdit=${enEdit} actualizando=${actualizando} depurando=${depurando} obteniendoCert=${obteniendoCert} modalCancelar=${modalCancelar} requestId0=${requestId0}`);
 
         if (requestId0) {
-            await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => {});
+            await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => { });
             throw new Error('[CERT-EX][CRITICO] Request Id 0 detectado durante espera de request edit estable');
         }
 
@@ -3108,7 +3674,7 @@ async function esperarUrlRequestEditEstableCert(page: Page, contexto: string) {
         await page.waitForTimeout(700);
     }
 
-    await page.screenshot({ path: `artifacts/cert_ex_timeout_request_edit_${Date.now()}.png`, fullPage: true }).catch(() => {});
+    await page.screenshot({ path: `artifacts/cert_ex_timeout_request_edit_${Date.now()}.png`, fullPage: true }).catch(() => { });
     throw new Error(`[CERT-EX][CRITICO] Timeout esperando request edit estable contexto=${contexto}`);
 }
 
@@ -3152,7 +3718,7 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             });
             console.log(`[Flujo][intento=${intento}] dispatchEvent click ejecutado=${navegado}`);
             if (navegado) {
-                await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 30000 }).catch(() => {});
+                await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 30000 }).catch(() => { });
             }
             const urlTrasNav = page.url();
             console.log(`[Flujo][intento=${intento}] URL tras navegacion: ${urlTrasNav}`);
@@ -3427,240 +3993,240 @@ async function etapaValidacionesPrevias(page: Page) {
 // === FUNCIONES ROBUSTAS DE SELECCIÓN DE PRODUCTOS (patrón de ce-ex adaptado para Certificados) ===
 
 async function seleccionarCategoriaEnSeccionProductosRobusto(page: Page, seccionProductos: Locator) {
-  console.log(`[CERT-EX][Producto][Seleccion] seleccionarCategoriaEnSeccionProductos INIT`);
-  console.log(`[CERT-EX][Producto][Seleccion] Sección Productos visible`);
+    console.log(`[CERT-EX][Producto][Seleccion] seleccionarCategoriaEnSeccionProductos INIT`);
+    console.log(`[CERT-EX][Producto][Seleccion] Sección Productos visible`);
 
-  // Estrategia 1: Buscar por label "Categoría de producto"
-  console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Categoría por label`);
-  const labelCategoriaBuscadores = [
-    seccionProductos.locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria de producto")]'),
-    seccionProductos.getByText(/Categor[ií]a de producto/i),
-  ];
+    // Estrategia 1: Buscar por label "Categoría de producto"
+    console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Categoría por label`);
+    const labelCategoriaBuscadores = [
+        seccionProductos.locator('xpath=//*[contains(translate(normalize-space(.),"ÁÉÍÓÚáéíóú","AEIOUaeiou"),"Categoria de producto")]'),
+        seccionProductos.getByText(/Categor[ií]a de producto/i),
+    ];
 
-  let categoriaDropdown: Locator | null = null;
-  for (const labelLocator of labelCategoriaBuscadores) {
-    const visible = await labelLocator.isVisible().catch(() => false);
-    if (visible) {
-      // Encontró el label, ahora buscar el dropdown cercano
-      try {
-        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
-        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
-        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
-        if (dropdownVisible) {
-          console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por label`);
-          categoriaDropdown = dropdownEnParent;
-          break;
+    let categoriaDropdown: Locator | null = null;
+    for (const labelLocator of labelCategoriaBuscadores) {
+        const visible = await labelLocator.isVisible().catch(() => false);
+        if (visible) {
+            // Encontró el label, ahora buscar el dropdown cercano
+            try {
+                const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+                const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+                const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+                if (dropdownVisible) {
+                    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por label`);
+                    categoriaDropdown = dropdownEnParent;
+                    break;
+                }
+            } catch (e) {
+                console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+            }
         }
-      } catch (e) {
-        console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
-      }
-    }
-  }
-
-  // Estrategia 2: Fallback posicional - usar el primer dropdown visible
-  if (!categoriaDropdown) {
-    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría no encontrado por label; usando fallback posicional`);
-    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
-    const count = await dropdowns.count().catch(() => 0);
-    if (count >= 1) {
-      console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por posición 1/${count}`);
-      categoriaDropdown = dropdowns.first();
-    }
-  }
-
-  if (!categoriaDropdown) {
-    console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Categoría de producto`);
-    throw new Error("[CRITICO] No se encontro dropdown de 'Categoria de producto' en la seccion de Productos.");
-  }
-
-  // Verificar si el dropdown ya tiene valor seleccionado
-  const labelDropdown = categoriaDropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
-  let valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
-  if (valor && !/seleccionar|por favor|elige|--/i.test(valor)) {
-    console.log(`[CERT-EX][Producto][Seleccion] Categoría ya seleccionada: ${valor}`);
-    return;
-  }
-
-  // Abrir el dropdown y seleccionar la categoría
-  for (let intento = 1; intento <= 3; intento++) {
-    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando categoría: Certificados de Deposito (intento ${intento}/3)`);
-    await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
-    await categoriaDropdown.scrollIntoViewIfNeeded().catch(() => { });
-    await categoriaDropdown.click({ force: true }).catch(() => { });
-    await page.waitForTimeout(300);
-
-    const combobox = categoriaDropdown.locator('[role="combobox"]').first();
-    const panelId = await combobox.getAttribute("aria-controls").catch(() => null);
-    let panel: Locator | null = null;
-    if (panelId) {
-      const byId = page.locator(`#${panelId}`);
-      const visible = await byId.waitFor({ state: "visible", timeout: 2000 })
-        .then(() => true)
-        .catch(() => false);
-      if (visible) panel = byId;
-    }
-    if (!panel) {
-      const fallback = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').last();
-      const visible = await fallback.waitFor({ state: "visible", timeout: 2000 })
-        .then(() => true)
-        .catch(() => false);
-      if (visible) panel = fallback;
     }
 
-    if (panel) {
-      // Reintentar si hay botón de reintentar
-      const btnRetryPanel = panel
-        .locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button.p-button-warning')
-        .first();
-      if (await btnRetryPanel.isVisible().catch(() => false)) {
-        await btnRetryPanel.click({ force: true }).catch(() => { });
-        await page.waitForTimeout(800);
-      }
-
-      // Buscar y seleccionar la opción "Certificados de Deposito"
-      const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
-      const listo = await items.first().waitFor({ state: "visible", timeout: 3000 })
-        .then(() => true)
-        .catch(() => false);
-      const countItems = await items.count().catch(() => 0);
-      if (listo && countItems > 0) {
-        const itemCategoria = items.filter({ hasText: /Certificados de Deposito|Certificados de depósito|Certificados?/i }).first();
-        if (await itemCategoria.isVisible().catch(() => false)) {
-          console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: Certificados de Deposito`);
-          await itemCategoria.click({ force: true }).catch(() => { });
-        } else {
-          console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: primera opción (índice 0)`);
-          await items.nth(0).click({ force: true }).catch(() => { });
+    // Estrategia 2: Fallback posicional - usar el primer dropdown visible
+    if (!categoriaDropdown) {
+        console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría no encontrado por label; usando fallback posicional`);
+        const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const count = await dropdowns.count().catch(() => 0);
+        if (count >= 1) {
+            console.log(`[CERT-EX][Producto][Seleccion] Dropdown Categoría encontrado por posición 1/${count}`);
+            categoriaDropdown = dropdowns.first();
         }
-      }
     }
 
-    await page.waitForTimeout(200);
-    valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+    if (!categoriaDropdown) {
+        console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Categoría de producto`);
+        throw new Error("[CRITICO] No se encontro dropdown de 'Categoria de producto' en la seccion de Productos.");
+    }
+
+    // Verificar si el dropdown ya tiene valor seleccionado
+    const labelDropdown = categoriaDropdown.locator('.p-dropdown-label, [data-pc-section="label"]').first();
+    let valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
     if (valor && !/seleccionar|por favor|elige|--/i.test(valor)) {
-      console.log(`[CERT-EX][Producto][Seleccion] Categoría seleccionada: ${valor}`);
-      return;
+        console.log(`[CERT-EX][Producto][Seleccion] Categoría ya seleccionada: ${valor}`);
+        return;
     }
 
-    await page.waitForTimeout(800);
-  }
+    // Abrir el dropdown y seleccionar la categoría
+    for (let intento = 1; intento <= 3; intento++) {
+        console.log(`[CERT-EX][Producto][Seleccion] Seleccionando categoría: Certificados de Deposito (intento ${intento}/3)`);
+        await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+        await categoriaDropdown.scrollIntoViewIfNeeded().catch(() => { });
+        await categoriaDropdown.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(300);
 
-  throw new Error("[CRITICO] No se pudo seleccionar 'Categoria de producto' en la seccion de Productos.");
+        const combobox = categoriaDropdown.locator('[role="combobox"]').first();
+        const panelId = await combobox.getAttribute("aria-controls").catch(() => null);
+        let panel: Locator | null = null;
+        if (panelId) {
+            const byId = page.locator(`#${panelId}`);
+            const visible = await byId.waitFor({ state: "visible", timeout: 2000 })
+                .then(() => true)
+                .catch(() => false);
+            if (visible) panel = byId;
+        }
+        if (!panel) {
+            const fallback = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').last();
+            const visible = await fallback.waitFor({ state: "visible", timeout: 2000 })
+                .then(() => true)
+                .catch(() => false);
+            if (visible) panel = fallback;
+        }
+
+        if (panel) {
+            // Reintentar si hay botón de reintentar
+            const btnRetryPanel = panel
+                .locator('button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button.p-button-warning')
+                .first();
+            if (await btnRetryPanel.isVisible().catch(() => false)) {
+                await btnRetryPanel.click({ force: true }).catch(() => { });
+                await page.waitForTimeout(800);
+            }
+
+            // Buscar y seleccionar la opción "Certificados de Deposito"
+            const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+            const listo = await items.first().waitFor({ state: "visible", timeout: 3000 })
+                .then(() => true)
+                .catch(() => false);
+            const countItems = await items.count().catch(() => 0);
+            if (listo && countItems > 0) {
+                const itemCategoria = items.filter({ hasText: /Certificados de Deposito|Certificados de depósito|Certificados?/i }).first();
+                if (await itemCategoria.isVisible().catch(() => false)) {
+                    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: Certificados de Deposito`);
+                    await itemCategoria.click({ force: true }).catch(() => { });
+                } else {
+                    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando: primera opción (índice 0)`);
+                    await items.nth(0).click({ force: true }).catch(() => { });
+                }
+            }
+        }
+
+        await page.waitForTimeout(200);
+        valor = ((await labelDropdown.textContent().catch(() => "")) || "").trim();
+        if (valor && !/seleccionar|por favor|elige|--/i.test(valor)) {
+            console.log(`[CERT-EX][Producto][Seleccion] Categoría seleccionada: ${valor}`);
+            return;
+        }
+
+        await page.waitForTimeout(800);
+    }
+
+    throw new Error("[CRITICO] No se pudo seleccionar 'Categoria de producto' en la seccion de Productos.");
 }
 
 async function seleccionarProductoEnSeccionProductosConDropdown(
-  page: Page,
-  productoDropdown: Locator,
-  tipoCuenta: string
+    page: Page,
+    productoDropdown: Locator,
+    tipoCuenta: string
 ) {
-  try {
-    await productoDropdown.click({ timeout: 3000 }).catch(async () => {
-      await productoDropdown.click({ force: true, timeout: 3000 });
-    });
+    try {
+        await productoDropdown.click({ timeout: 3000 }).catch(async () => {
+            await productoDropdown.click({ force: true, timeout: 3000 });
+        });
 
-    const panel = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
-    const panelVisible = await panel.isVisible({ timeout: 5000 }).catch(() => false);
-    if (!panelVisible) {
-      throw new Error(`[Producto][CRITICO] No abrió panel Producto tipoCuenta='${tipoCuenta}'`);
-    }
+        const panel = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
+        const panelVisible = await panel.isVisible({ timeout: 5000 }).catch(() => false);
+        if (!panelVisible) {
+            throw new Error(`[Producto][CRITICO] No abrió panel Producto tipoCuenta='${tipoCuenta}'`);
+        }
 
-    console.log('[CERT-EX][Producto][Seleccion] Opciones de Producto visibles');
+        console.log('[CERT-EX][Producto][Seleccion] Opciones de Producto visibles');
 
-    const opciones = panel.locator('li[role="option"], .p-dropdown-item, .p-select-option');
-    const total = await opciones.count().catch(() => 0);
-    if (total === 0) {
-      throw new Error(`[CERT-EX][Producto][CRITICO] Panel abierto pero sin opciones tipoCuenta='${tipoCuenta}'`);
-    }
+        const opciones = panel.locator('li[role="option"], .p-dropdown-item, .p-select-option');
+        const total = await opciones.count().catch(() => 0);
+        if (total === 0) {
+            throw new Error(`[CERT-EX][Producto][CRITICO] Panel abierto pero sin opciones tipoCuenta='${tipoCuenta}'`);
+        }
 
-    const nombreRegex = tipoCuenta
-      .normalize('NFD')
-      .replace(/[̀-ͯ]/g, '')
-      .toLowerCase();
+        const nombreRegex = tipoCuenta
+            .normalize('NFD')
+            .replace(/[̀-ͯ]/g, '')
+            .toLowerCase();
 
-    for (let i = 0; i < total; i++) {
-      const texto = (await opciones.nth(i).innerText().catch(() => '')).trim();
-      const normalizado = texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-      if (normalizado.includes(nombreRegex)) {
-        console.log(`[CERT-EX][Producto][Seleccion] Seleccionando opción: ${texto}`);
-        await opciones.nth(i).click({ force: true }).catch(() => { });
-        console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: ${texto}`);
+        for (let i = 0; i < total; i++) {
+            const texto = (await opciones.nth(i).innerText().catch(() => '')).trim();
+            const normalizado = texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+            if (normalizado.includes(nombreRegex)) {
+                console.log(`[CERT-EX][Producto][Seleccion] Seleccionando opción: ${texto}`);
+                await opciones.nth(i).click({ force: true }).catch(() => { });
+                console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: ${texto}`);
+                console.log('[CERT-EX][Producto][Seleccion] Validación producto seleccionado OK');
+                return;
+            }
+        }
+
+        console.log(`[CERT-EX][Producto][Seleccion] Tipo '${tipoCuenta}' no encontrado; seleccionando primera opción`);
+        await opciones.nth(0).click({ force: true }).catch(() => { });
+        console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: primera opción`);
         console.log('[CERT-EX][Producto][Seleccion] Validación producto seleccionado OK');
-        return;
-      }
+    } catch (error) {
+        console.log(`[CERT-EX][Producto][Seleccion][ERROR] Fallo selección directa: ${String(error)}`);
+        throw new Error(`[CRITICO] No se pudo seleccionar Producto para '${tipoCuenta}'.`);
     }
-
-    console.log(`[CERT-EX][Producto][Seleccion] Tipo '${tipoCuenta}' no encontrado; seleccionando primera opción`);
-    await opciones.nth(0).click({ force: true }).catch(() => { });
-    console.log(`[CERT-EX][Producto][Seleccion] Producto seleccionado: primera opción`);
-    console.log('[CERT-EX][Producto][Seleccion] Validación producto seleccionado OK');
-  } catch (error) {
-    console.log(`[CERT-EX][Producto][Seleccion][ERROR] Fallo selección directa: ${String(error)}`);
-    throw new Error(`[CRITICO] No se pudo seleccionar Producto para '${tipoCuenta}'.`);
-  }
 }
 
 async function seleccionarProductoEnSeccionProductosRobusto(
-  page: Page,
-  seccionProductos: Locator,
-  tipoCuenta: string,
-  productoDropdownPrelocalizado?: Locator | null
+    page: Page,
+    seccionProductos: Locator,
+    tipoCuenta: string,
+    productoDropdownPrelocalizado?: Locator | null
 ) {
-  // Si ya tenemos el dropdown prelocalizado, usarlo directamente
-  if (productoDropdownPrelocalizado) {
-    console.log('[CERT-EX][Producto][Seleccion] Usando dropdown Producto previamente detectado por posición 2/2');
-    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
-    console.log('[CERT-EX][Producto][Seleccion] Abriendo dropdown Producto');
-    return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdownPrelocalizado, tipoCuenta);
-  }
+    // Si ya tenemos el dropdown prelocalizado, usarlo directamente
+    if (productoDropdownPrelocalizado) {
+        console.log('[CERT-EX][Producto][Seleccion] Usando dropdown Producto previamente detectado por posición 2/2');
+        console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
+        console.log('[CERT-EX][Producto][Seleccion] Abriendo dropdown Producto');
+        return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdownPrelocalizado, tipoCuenta);
+    }
 
-  console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Producto por label`);
+    console.log(`[CERT-EX][Producto][Seleccion] Buscando dropdown Producto por label`);
 
-  // Estrategia 1: Buscar por label "Producto"
-  const labelProductoBuscadores = [
-    seccionProductos.getByText(/^Producto$/i),
-  ];
+    // Estrategia 1: Buscar por label "Producto"
+    const labelProductoBuscadores = [
+        seccionProductos.getByText(/^Producto$/i),
+    ];
 
-  let productoDropdown: Locator | null = null;
-  for (const labelLocator of labelProductoBuscadores) {
-    const visible = await labelLocator.isVisible().catch(() => false);
-    if (visible) {
-      // Encontró el label, ahora buscar el dropdown cercano
-      try {
-        const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
-        const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
-        const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
-        if (dropdownVisible) {
-          console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por label`);
-          productoDropdown = dropdownEnParent;
-          break;
+    let productoDropdown: Locator | null = null;
+    for (const labelLocator of labelProductoBuscadores) {
+        const visible = await labelLocator.isVisible().catch(() => false);
+        if (visible) {
+            // Encontró el label, ahora buscar el dropdown cercano
+            try {
+                const parent = labelLocator.locator('xpath=ancestor::*[self::fieldset or self::div][1]');
+                const dropdownEnParent = parent.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, [role="combobox"]:visible').first();
+                const dropdownVisible = await dropdownEnParent.isVisible().catch(() => false);
+                if (dropdownVisible) {
+                    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por label`);
+                    productoDropdown = dropdownEnParent;
+                    break;
+                }
+            } catch (e) {
+                console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
+            }
         }
-      } catch (e) {
-        console.log(`[CERT-EX][Producto][Seleccion] Error buscando dropdown cerca del label: ${String(e)}`);
-      }
     }
-  }
 
-  // Estrategia 2: Fallback posicional - usar el segundo dropdown visible (el primero es Categoría)
-  if (!productoDropdown) {
-    console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto no encontrado por label; usando fallback posicional`);
-    const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
-    const count = await dropdowns.count().catch(() => 0);
-    console.log(`[CERT-EX][Producto][Seleccion] dropdowns en sección Productos=${count}`);
-    if (count >= 2) {
-      console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por posición 2/${count}`);
-      productoDropdown = dropdowns.nth(1);
-    } else {
-      console.log(`[CERT-EX][Producto][Seleccion] Producto no listo: solo ${count} dropdown visible; NO se usará como Producto`);
+    // Estrategia 2: Fallback posicional - usar el segundo dropdown visible (el primero es Categoría)
+    if (!productoDropdown) {
+        console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto no encontrado por label; usando fallback posicional`);
+        const dropdowns = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const count = await dropdowns.count().catch(() => 0);
+        console.log(`[CERT-EX][Producto][Seleccion] dropdowns en sección Productos=${count}`);
+        if (count >= 2) {
+            console.log(`[CERT-EX][Producto][Seleccion] Dropdown Producto encontrado por posición 2/${count}`);
+            productoDropdown = dropdowns.nth(1);
+        } else {
+            console.log(`[CERT-EX][Producto][Seleccion] Producto no listo: solo ${count} dropdown visible; NO se usará como Producto`);
+        }
     }
-  }
 
-  if (!productoDropdown) {
-    console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Producto`);
-    throw new Error("[CRITICO] No se encontro dropdown de 'Producto' en la seccion de Productos.");
-  }
+    if (!productoDropdown) {
+        console.log(`[CERT-EX][Producto][Seleccion][ERROR] No se encontró dropdown de Producto`);
+        throw new Error("[CRITICO] No se encontro dropdown de 'Producto' en la seccion de Productos.");
+    }
 
-  console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
-  return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdown, tipoCuenta);
+    console.log(`[CERT-EX][Producto][Seleccion] Seleccionando producto: ${tipoCuenta}`);
+    return await seleccionarProductoEnSeccionProductosConDropdown(page, productoDropdown, tipoCuenta);
 }
 
 async function etapaSeccionProductos(context: BrowserContext, page: Page, registro: RegistroExcel) {
@@ -3696,7 +4262,7 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         .catch(() => false);
     if (requestId0Visible) {
         console.log('[CERT-EX][Guard][CRITICO] Request Id 0 detectado; no se contin\u00faa');
-        await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => {});
+        await page.screenshot({ path: `artifacts/cert_ex_request_id_0_${Date.now()}.png`, fullPage: true }).catch(() => { });
         throw new Error('[CERT-EX][Guard][CRITICO] Request Id 0 detectado; no se contin\u00faa a Productos');
     }
     console.log('[CERT-EX][Guard] requestId0Visible=false');
@@ -3809,33 +4375,33 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
     let pantallaProductosDetectada = false;
 
     while (Date.now() - inicioEspera < maxEsperaProductos) {
-      if (page.isClosed()) {
-        throw new Error('[CERT-EX][PAGE][CLOSED] Page cerrada mientras esperaba pantalla Productos');
-      }
+        if (page.isClosed()) {
+            throw new Error('[CERT-EX][PAGE][CLOSED] Page cerrada mientras esperaba pantalla Productos');
+        }
 
-      const categoriaVisible_signal = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
-      const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
-      const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
+        const categoriaVisible_signal = await page.getByText(/Categor[ií]a de producto/i).first().isVisible().catch(() => false);
+        const productoVisible = await page.getByText(/^Producto$/i).first().isVisible().catch(() => false);
+        const productosTextVisible = await page.getByText(/^Productos$/i).isVisible().catch(() => false);
 
-      const signals = [categoriaVisible_signal, productoVisible, productosTextVisible];
-      const signalsCount = signals.filter(Boolean).length;
+        const signals = [categoriaVisible_signal, productoVisible, productosTextVisible];
+        const signalsCount = signals.filter(Boolean).length;
 
-      if (signalsCount >= 2) {
-        console.log(`[CERT-EX][Producto][Seleccion] Señales de pantalla Productos detectadas (${signalsCount}/3): categoría=${categoriaVisible_signal}, producto=${productoVisible}, productos=${productosTextVisible}`);
-        pantallaProductosDetectada = true;
-        break;
-      }
+        if (signalsCount >= 2) {
+            console.log(`[CERT-EX][Producto][Seleccion] Señales de pantalla Productos detectadas (${signalsCount}/3): categoría=${categoriaVisible_signal}, producto=${productoVisible}, productos=${productosTextVisible}`);
+            pantallaProductosDetectada = true;
+            break;
+        }
 
-      await page.waitForTimeout(500);
+        await page.waitForTimeout(500);
     }
 
     if (!pantallaProductosDetectada) {
-      console.log('[CERT-EX][Producto][Seleccion][WARN] Pantalla Productos no detectada en timeout, verificando si hay modal de error');
-      const modalError = page.locator('.p-dialog:visible, [role="dialog"]:visible').first();
-      const tieneModal = await modalError.isVisible().catch(() => false);
-      if (tieneModal) {
-        throw new Error('[CERT-EX][PAGE][MODAL] Modal de error visible después de Continuar');
-      }
+        console.log('[CERT-EX][Producto][Seleccion][WARN] Pantalla Productos no detectada en timeout, verificando si hay modal de error');
+        const modalError = page.locator('.p-dialog:visible, [role="dialog"]:visible').first();
+        const tieneModal = await modalError.isVisible().catch(() => false);
+        if (tieneModal) {
+            throw new Error('[CERT-EX][PAGE][MODAL] Modal de error visible después de Continuar');
+        }
     }
 
     console.log(`[CERT-EX][Producto][Seleccion] Sección Productos visible=${pantallaProductosDetectada}`);
@@ -3849,25 +4415,25 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
     console.log(`[CERT-EX][Producto][Seleccion] Dropdowns después de categoría: ${dropdownsPostCategoria}`);
 
     if (dropdownsPostCategoria >= 2) {
-      // Hay al menos 2 dropdowns (categoría + producto)
-      const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
-      await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
+        // Hay al menos 2 dropdowns (categoría + producto)
+        const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
+        await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
     } else if (dropdownsPostCategoria === 1) {
-      // Solo hay 1 dropdown visible - esperar a que aparezca el producto y reintentar
-      console.log('[CERT-EX][Producto][Seleccion] Solo 1 dropdown visible; esperando producto...');
-      for (let i = 0; i < 4; i++) {
-        await page.waitForTimeout(600);
-        const dropdownsNow = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
-        if (dropdownsNow >= 2) {
-          console.log(`[CERT-EX][Producto][Seleccion] Producto dropdown ahora visible (intento ${i + 1})`);
-          const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
-          await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
-          break;
+        // Solo hay 1 dropdown visible - esperar a que aparezca el producto y reintentar
+        console.log('[CERT-EX][Producto][Seleccion] Solo 1 dropdown visible; esperando producto...');
+        for (let i = 0; i < 4; i++) {
+            await page.waitForTimeout(600);
+            const dropdownsNow = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
+            if (dropdownsNow >= 2) {
+                console.log(`[CERT-EX][Producto][Seleccion] Producto dropdown ahora visible (intento ${i + 1})`);
+                const productoDropdown = await seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
+                await seleccionarProductoEnSeccionProductosRobusto(page, seccionProductos, registro.tipoCuenta, productoDropdown);
+                break;
+            }
         }
-      }
     } else {
-      // Sin dropdowns - no hacer nada
-      console.log('[CERT-EX][Producto][Seleccion] Sin dropdowns visibles - producto posiblemente ya fue seleccionado');
+        // Sin dropdowns - no hacer nada
+        console.log('[CERT-EX][Producto][Seleccion] Sin dropdowns visibles - producto posiblemente ya fue seleccionado');
     }
 
     const msgSinProductos = page.getByText(/No se agregaron productos en simulaci(?:o|\u00f3)n/i).first();
@@ -3907,38 +4473,38 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
 
     // Helper para localizar inputs editables después de un label
     const localizarInputEditableDespuesDeLabel = async (
-      modal: Locator,
-      labelRx: RegExp
+        modal: Locator,
+        labelRx: RegExp
     ): Promise<Locator> => {
-      const label = modal.getByText(labelRx).first();
-      await label.waitFor({ state: 'visible', timeout: 15000 });
+        const label = modal.getByText(labelRx).first();
+        await label.waitFor({ state: 'visible', timeout: 15000 });
 
-      console.log(`[CERT-EX][Certificados][Modal] Localizando input editable para ${labelRx}`);
+        console.log(`[CERT-EX][Certificados][Modal] Localizando input editable para ${labelRx}`);
 
-      // Buscar todos los inputs DESPUÉS del label (no ancestor)
-      // Excluir readonly, disabled, y hidden
-      const candidatos = label.locator(
-        'xpath=following::input[not(@readonly) and not(@disabled) and not(ancestor::*[contains(@style,"display: none")])]'
-      );
+        // Buscar todos los inputs DESPUÉS del label (no ancestor)
+        // Excluir readonly, disabled, y hidden
+        const candidatos = label.locator(
+            'xpath=following::input[not(@readonly) and not(@disabled) and not(ancestor::*[contains(@style,"display: none")])]'
+        );
 
-      const count = await candidatos.count().catch(() => 0);
+        const count = await candidatos.count().catch(() => 0);
 
-      for (let i = 0; i < count; i++) {
-        const input = candidatos.nth(i);
-        const visible = await input.isVisible().catch(() => false);
-        const editable = await input.isEditable().catch(() => false);
-        const value = (await input.inputValue().catch(() => '')).trim();
-        const outerHtml = (await input.evaluate((el: any) => (el as HTMLElement).outerHTML).catch(() => ''));
+        for (let i = 0; i < count; i++) {
+            const input = candidatos.nth(i);
+            const visible = await input.isVisible().catch(() => false);
+            const editable = await input.isEditable().catch(() => false);
+            const value = (await input.inputValue().catch(() => '')).trim();
+            const outerHtml = (await input.evaluate((el: any) => (el as HTMLElement).outerHTML).catch(() => ''));
 
-        console.log(`[CERT-EX][Certificados][Modal] candidato ${labelRx} #${i} visible=${visible} editable=${editable} value="${value.substring(0, 50)}" outer=${outerHtml.substring(0, 250)}`);
+            console.log(`[CERT-EX][Certificados][Modal] candidato ${labelRx} #${i} visible=${visible} editable=${editable} value="${value.substring(0, 50)}" outer=${outerHtml.substring(0, 250)}`);
 
-        if (visible && editable) {
-          console.log(`[CERT-EX][Certificados][Modal] Campo ${labelRx} editable localizado`);
-          return input;
+            if (visible && editable) {
+                console.log(`[CERT-EX][Certificados][Modal] Campo ${labelRx} editable localizado`);
+                return input;
+            }
         }
-      }
 
-      throw new Error(`[CERT-EX][Certificados][CRITICO] No se encontró input editable para ${labelRx}`);
+        throw new Error(`[CERT-EX][Certificados][CRITICO] No se encontró input editable para ${labelRx}`);
     };
 
     const llenarModalCertificado = async () => {
@@ -3970,47 +4536,47 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         let inputInteres: Locator | null = null;
 
         try {
-          inputMonto = await localizarInputEditableDespuesDeLabel(dialogo, /^Monto$/i);
+            inputMonto = await localizarInputEditableDespuesDeLabel(dialogo, /^Monto$/i);
         } catch (e) {
-          console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
-          throw new Error("[CRITICO] No se localizó campo editable Monto en modal de certificado.");
+            console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
+            throw new Error("[CRITICO] No se localizó campo editable Monto en modal de certificado.");
         }
 
         try {
-          inputPlazo = await localizarInputEditableDespuesDeLabel(dialogo, /^Plazo$/i);
+            inputPlazo = await localizarInputEditableDespuesDeLabel(dialogo, /^Plazo$/i);
         } catch (e) {
-          console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
-          throw new Error("[CRITICO] No se localizó campo editable Plazo en modal de certificado.");
+            console.log(`[CERT-EX][Certificados][Modal][ERROR] ${String(e)}`);
+            throw new Error("[CRITICO] No se localizó campo editable Plazo en modal de certificado.");
         }
 
         // Campos opcionales
         try {
-          inputTasa = await localizarInputEditableDespuesDeLabel(dialogo, /^Tasa$/i);
+            inputTasa = await localizarInputEditableDespuesDeLabel(dialogo, /^Tasa$/i);
         } catch (e) {
-          console.log(`[CERT-EX][Certificados][Modal] Tasa no es editable o no encontrada (opcional)`);
+            console.log(`[CERT-EX][Certificados][Modal] Tasa no es editable o no encontrada (opcional)`);
         }
 
         try {
-          inputInteres = await localizarInputEditableDespuesDeLabel(dialogo, /^Inter[eé]s$/i);
+            inputInteres = await localizarInputEditableDespuesDeLabel(dialogo, /^Inter[eé]s$/i);
         } catch (e) {
-          console.log(`[CERT-EX][Certificados][Modal] Interés no es editable o no encontrada (opcional)`);
+            console.log(`[CERT-EX][Certificados][Modal] Interés no es editable o no encontrada (opcional)`);
         }
 
         // Validar que son editables
         const montoEditable = await inputMonto.isEditable({ timeout: 10000 }).catch(() => false);
         if (!montoEditable) {
-          throw new Error("[CRITICO] Campo Monto no es editable después de localización.");
+            throw new Error("[CRITICO] Campo Monto no es editable después de localización.");
         }
 
         const plazoEditable = await inputPlazo.isEditable({ timeout: 10000 }).catch(() => false);
         if (!plazoEditable) {
-          throw new Error("[CRITICO] Campo Plazo no es editable después de localización.");
+            throw new Error("[CRITICO] Campo Plazo no es editable después de localización.");
         }
 
-        await inputMonto.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
-        await inputPlazo.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
-        if (inputTasa) await inputTasa.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
-        if (inputInteres) await inputInteres.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+        await inputMonto.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
+        await inputPlazo.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
+        if (inputTasa) await inputTasa.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
+        if (inputInteres) await inputInteres.waitFor({ state: 'visible', timeout: 8000 }).catch(() => { });
 
         // MONTO
         console.log('[CERT-EX][Certificados][Modal] Llenando campo Monto');
@@ -4109,8 +4675,8 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
                 // Disparadores suaves: Tab y click en intentos específicos
                 if (intento === 1 || intento === 4 || intento === 7) {
                     try {
-                        await inputTasa.click({ force: true }).catch(() => {});
-                        await page.keyboard.press('Tab').catch(() => {});
+                        await inputTasa.click({ force: true }).catch(() => { });
+                        await page.keyboard.press('Tab').catch(() => { });
                     } catch (e) {
                         // Continuar sin fallar
                     }
@@ -4126,7 +4692,7 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
 
             if (btnVisible) {
                 console.log('[CERT-EX][Certificados][Modal] Botón calcular tasa visible=true');
-                await btnCalcularTasa.click().catch(() => {});
+                await btnCalcularTasa.click().catch(() => { });
                 await page.waitForTimeout(1500);
 
                 // Intentar leer tasa una vez más después del click
@@ -4172,6 +4738,7 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
             if (!valorTasaExcel) {
                 throw new Error("[CRITICO] Registro marcado con Tasa Exepcion=SI sin Valor Tasa en Excel.");
             }
+            tasaExcepcionSolicitadaPorPage.set(page, valorTasaExcel);
             console.log(`[CERT-EX][TasaExcepcion] Aplica tasa excepción=true valorExcel=${valorTasaExcel}`);
             console.log(`[CERT-EX][TasaExcepcion] Tasa automática antes de excepción=${tasaCalculada}`);
 
@@ -4219,22 +4786,22 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         // === FASE 4: ACEPTAR MODAL PRINCIPAL ===
         console.log("[CERT-EX][Certificados][Modal] Click en Aceptar final del modal principal");
         const btnAceptar = dialogo.getByRole('button', { name: /^Aceptar$/i }).last();
-        await btnAceptar.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+        await btnAceptar.waitFor({ state: 'visible', timeout: 15000 }).catch(() => { });
 
         // Click normal primero
-        await btnAceptar.click().catch(() => {});
+        await btnAceptar.click().catch(() => { });
         await page.waitForTimeout(800);
 
         // Si el dialog sigue abierto, usar focus + Enter (mismo patrón que cierra el modal de tasa excepción)
         const dialogoSigueAbierto = await dialogo.isVisible().catch(() => false);
         if (dialogoSigueAbierto) {
             console.log("[CERT-EX][Certificados][Modal] Click normal no cerró modal, usando focus+Enter");
-            await btnAceptar.focus().catch(() => {});
+            await btnAceptar.focus().catch(() => { });
             await page.waitForTimeout(200);
             await page.keyboard.press("Enter");
         }
 
-        await dialogo.waitFor({ state: 'hidden', timeout: 20000 }).catch(() => {});
+        await dialogo.waitFor({ state: 'hidden', timeout: 20000 }).catch(() => { });
         console.log('[CERT-EX][Certificados][Modal] Modal principal cerrado correctamente');
         await page.waitForTimeout(1200);
         console.log('[CERT-EX][Certificados][Modal] Certificado agregado correctamente');
@@ -4256,12 +4823,22 @@ async function etapaSeccionProductos(context: BrowserContext, page: Page, regist
         const btnContinuarVisible = await btnContinuar.isVisible().catch(() => false);
 
         if (btnContinuarVisible) {
-            console.log('[CERT-EX][Producto][Avance] Click en Continuar');
-            await btnContinuar.click().catch(() => {});
-            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            console.log('[CERT-EX][Producto][Avance] Preparando click Continuar');
+            await btnContinuar.click({ force: true }).catch(() => { });
+            console.log('[CERT-EX][Producto][Avance] Click en Continuar ejecutado');
+            await page.waitForLoadState('domcontentloaded').catch(() => { });
             await page.waitForTimeout(1500);
-            console.log('[CERT-EX][Producto][Avance] Post-click Continuar, esperando estabilidad');
+            console.log('[CERT-EX][Producto][Avance] Verificando si se llegó a Verificaciones con tasa en espera');
+
+            if (await saltarABizagiSiTasaEnEspera(page)) {
+                return;
+            }
+
+            console.log('[CERT-EX][Producto][Avance] Aún no se detecta Verificaciones con tasa en espera; continúa flujo normal');
             await esperarFinActualizandoSolicitud(page, 8000).catch(() => false);
+            if (await saltarABizagiSiTasaEnEspera(page)) {
+                return;
+            }
             console.log('[CERT-EX][Producto][Avance] Continuando flujo normal');
         } else {
             console.log('[CERT-EX][Producto][Avance] Botón Continuar no visible');
@@ -4523,8 +5100,21 @@ async function etapaTallerProductos(
         throw new Error("El botÃ³n 'Continuar' estÃ¡ deshabilitado despuÃ©s de crear el certificado.");
     }
 
+    console.log('[CERT-EX][Producto][Avance] Preparando click Continuar');
     await btnContinuar.click({ force: true });
+    console.log('[CERT-EX][Producto][Avance] Click en Continuar ejecutado');
+    await page.waitForTimeout(1500);
+    console.log('[CERT-EX][Producto][Avance] Verificando si se llegó a Verificaciones con tasa en espera');
+
+    if (await saltarABizagiSiTasaEnEspera(page)) {
+        return;
+    }
+
+    console.log('[CERT-EX][Producto][Avance] Aún no se detecta Verificaciones con tasa en espera; continúa flujo normal');
     await esperarFinActualizandoSolicitud(page, 30000).catch(() => false);
+    if (await saltarABizagiSiTasaEnEspera(page)) {
+        return;
+    }
     await page.waitForTimeout(1500);
 
     const sigueEnTaller =
@@ -4536,7 +5126,13 @@ async function etapaTallerProductos(
         const retryEnabled = retryVisible ? await btnContinuarRetry.isEnabled().catch(() => false) : false;
         if (retryVisible && retryEnabled) {
             await btnContinuarRetry.click({ force: true });
+            if (await saltarABizagiSiTasaEnEspera(page)) {
+                return;
+            }
             await esperarFinActualizandoSolicitud(page, 20000).catch(() => false);
+            if (await saltarABizagiSiTasaEnEspera(page)) {
+                return;
+            }
             await page.waitForTimeout(1200);
         }
     }
@@ -4584,7 +5180,7 @@ async function completarCamposNoCapitalizableSiAplican(page: Page, registro: Reg
         // Reintentar si hay boton naranja
         const btnReinInput = page.locator(`xpath=(//*[contains(normalize-space(.),"Frecuencia de pago inter")])[1]/following::button[contains(@class,"p-button-warning") or contains(normalize-space(.),"Reintentar")]`).first();
         if (await btnReinInput.isVisible().catch(() => false)) {
-            await btnReinInput.click({ force: true }).catch(() => {});
+            await btnReinInput.click({ force: true }).catch(() => { });
             await page.waitForTimeout(2500);
         }
 
@@ -4596,11 +5192,11 @@ async function completarCamposNoCapitalizableSiAplican(page: Page, registro: Reg
         // pressSequentially dispara keydown/keypress/keyup que PrimeNG p-inputnumber requiere
         await inputFrecuencia.pressSequentially("1", { delay: 60 }).catch(async () => {
             // Fallback: fill + eventos manuales
-            await inputFrecuencia!.fill("1").catch(() => {});
-            await inputFrecuencia!.dispatchEvent('input').catch(() => {});
-            await inputFrecuencia!.dispatchEvent('change').catch(() => {});
+            await inputFrecuencia!.fill("1").catch(() => { });
+            await inputFrecuencia!.dispatchEvent('input').catch(() => { });
+            await inputFrecuencia!.dispatchEvent('change').catch(() => { });
         });
-        await page.keyboard.press('Tab').catch(() => {});
+        await page.keyboard.press('Tab').catch(() => { });
         await page.waitForTimeout(400);
         console.log(`[TallerCertificados] Frecuencia de pago inter\u00e9s aplicada (valor 1)`);
     }
@@ -4832,7 +5428,7 @@ test('Certificados de Deposito Cliente existente - desde Excel', async () => {  
             },
             onRegistroFinally: async () => {
                 if (!page.isClosed()) {
-                    await prepararSiguienteRegistro(page).catch(() => {});
+                    await prepararSiguienteRegistro(page).catch(() => { });
                 }
             },
         });

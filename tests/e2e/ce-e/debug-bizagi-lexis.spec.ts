@@ -3,16 +3,18 @@ import {
     abrirBizagiDirectoDebug,
     asegurarLoginBizagiDebug,
     buscarMpnEnBizagiDebug,
-    abrirMpnEnBizagiDebug,
+    abrirFilaGestionCoincidenciasDebug,
     abrirGestionCoincidenciasDebug,
     aprobarGestionCoincidenciasMixtaDebug,
     resolverModoBizagiDebug,
-    guardarYSiguienteDebug,
+    seleccionarSolicitarAclaracionesNoDebug,
+    clickSiguienteGestionCoincidenciasDebug,
 } from '../../helpers/ceNewBizagiDebug';
 
 const BIZAGI_URL = process.env.BIZAGI_URL || 'https://test-bscrd-santacruz.bizagi.com/';
 const DEBUG_MPN = process.env.DEBUG_MPN || '';
 const DEBUG_BIZAGI_MODE = (process.env.DEBUG_BIZAGI_MODE || 'AUTO').toUpperCase();
+const DEBUG_LEXIS_AVANZAR = process.env.DEBUG_LEXIS_AVANZAR || '';
 
 test('DEBUG: Bizagi - Gestión de Coincidencias (directo, sin portal)', async ({ browser, context }) => {
     console.log('[DEBUG-BIZAGI] INICIO');
@@ -38,17 +40,16 @@ test('DEBUG: Bizagi - Gestión de Coincidencias (directo, sin portal)', async ({
         const loginRequerido = await asegurarLoginBizagiDebug(bizagiPage);
         console.log(`[DEBUG-BIZAGI] Login requerido=${loginRequerido}`);
 
-        // Buscar MPN
+        // Buscar MPN (la lógica real de ceExBizagi.ts)
         console.log(`[DEBUG-BIZAGI] Buscando MPN=${DEBUG_MPN}`);
         await buscarMpnEnBizagiDebug(bizagiPage, DEBUG_MPN);
         console.log('[DEBUG-BIZAGI] MPN encontrado');
 
-        // Abrir la fila encontrada
-        console.log(`[DEBUG-BIZAGI] Abriendo MPN=${DEBUG_MPN}`);
-        await abrirMpnEnBizagiDebug(bizagiPage, DEBUG_MPN);
-        console.log('[DEBUG-BIZAGI] MPN abierto');
+        // Abrir la fila de la actividad antes de validar pantalla
+        bizagiPage = await abrirFilaGestionCoincidenciasDebug(bizagiPage, DEBUG_MPN);
+        console.log('[DEBUG-BIZAGI] Fila Gestionar Coincidencias abierta');
 
-        // Verificar que está en Gestionar Coincidencias o una actividad de cumplimiento
+        // Verificar que está en Gestionar Coincidencias
         console.log('[DEBUG-BIZAGI] Verificando Gestionar Coincidencias');
         await abrirGestionCoincidenciasDebug(bizagiPage);
         console.log('[DEBUG-BIZAGI] Actividad Gestionar Coincidencias abierta');
@@ -73,10 +74,20 @@ test('DEBUG: Bizagi - Gestión de Coincidencias (directo, sin portal)', async ({
         await aprobarGestionCoincidenciasMixtaDebug(bizagiPage, modoEjecutable);
         console.log(`[DEBUG-BIZAGI] Modo ${modoEjecutable} completado`);
 
-        // Guardar y Siguiente
-        console.log('[DEBUG-BIZAGI] Guardando y avanzando');
-        await guardarYSiguienteDebug(bizagiPage);
-        console.log('[DEBUG-BIZAGI] Guardado completado');
+        // Solicitar Aclaraciones = No
+        await seleccionarSolicitarAclaracionesNoDebug(bizagiPage).catch(() => false);
+
+        // En modo LEXIS solo avanzar si DEBUG_LEXIS_AVANZAR=1
+        if (DEBUG_BIZAGI_MODE === 'LEXIS') {
+            if (DEBUG_LEXIS_AVANZAR === '1') {
+                console.log('[DEBUG-BIZAGI][LEXIS] DEBUG_LEXIS_AVANZAR=1; ejecutando Siguiente');
+                await clickSiguienteGestionCoincidenciasDebug(bizagiPage, { requiereConfirmacion: true });
+            } else {
+                console.log('[DEBUG-BIZAGI][LEXIS] Modo debug LEXIS: No seleccionado; no se ejecuta Siguiente porque DEBUG_LEXIS_AVANZAR!=1');
+            }
+        } else {
+            await clickSiguienteGestionCoincidenciasDebug(bizagiPage);
+        }
 
         // Tomar screenshot final
         const screenshotPath = `artifacts/evidencias_tmp/debug-bizagi-${DEBUG_BIZAGI_MODE}-${DEBUG_MPN}-final.png`;

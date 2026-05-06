@@ -19,8 +19,6 @@ import {
     leerRegistrosDesdeExcel,
     marcarCedulasProcesadasEnExcel,
     cancelarCasoEnBizagiDesdePortal,
-    abrirSolicitudCumplimientoEnBizagiDesdePortal,
-    abrirSolicitudPlaftEnBizagiDesdePortal,
     extraerCasoActivoMpn,
     seleccionarInstrumentoRobusto,
     seleccionarDropdownPorCampo,
@@ -74,6 +72,8 @@ const productosConfirmadosPorRegistro = new Set<string>();
 const productoProcesadoPorRegistro = new Set<string>();
 const postProductoCompletadoPorRegistro = new Set<string>();
 const postProductoEnProcesoPorRegistro = new Set<string>();
+const verificacionesEnResolucion = new Set<string>();
+const verificacionesResueltas = new Set<string>();
 
 const capturarPasoSeguro = async (page: Page, registro: RegistroExcel | null, paso: string): Promise<string | null> => {
     try {
@@ -408,14 +408,14 @@ async function esperarPendientesGestionDocumentalCero(page: Page, timeoutMs = FA
         loops++;
         console.log(`[GestionDoc] esperarPendientes... loop ${loops}: leyendo pendientes...`);
         const pendientes = await leerPendientesGestionDocumentalEnBoton(page).catch(() => 0);
-        
+
         console.log(`[GestionDoc] esperarPendientes... loop ${loops}: leyendo modalGestion...`);
         const modalGestion = page
             .locator('.p-dialog:visible, [role="dialog"]:visible')
             .filter({ hasText: /Gesti(?:o|\u00f3)n documental/i })
             .first();
         const modalVisible = await modalGestion.isVisible().catch(() => false);
-        
+
         console.log(`[GestionDoc] esperarPendientes... loop ${loops}: enviandoVisible...`);
         const enviandoVisible = modalVisible
             ? await modalGestion.getByText(/Enviando documento/i).first().isVisible().catch(() => false)
@@ -878,10 +878,6 @@ async function procesarVerificacionesEspeciales(page: Page) {
         return null;
     }
 
-    if (ofacPendiente && plaftPendiente) {
-        console.log('[Verificaciones][WARN] OFAC y PLAFT pendientes; se resolverá por rutas separadas');
-    }
-
     const mpnVisible = await page
         .locator('span.p-tag-value')
         .filter({ hasText: /^MPN-\d+$/i })
@@ -890,58 +886,74 @@ async function procesarVerificacionesEspeciales(page: Page) {
         .then((v) => (v || '').trim().toUpperCase())
         .catch(() => '');
 
-    if (plaftPendiente && !ofacPendiente) {
-        console.log('[Verificaciones] Resolviendo PLAFT');
-        console.log(`[Cumplimiento] mpnVisible='${mpnVisible}'`);
-        const verificacionPlaft = await abrirSolicitudPlaftEnBizagiDesdePortal(page, {
-            password: BIZAGI_PASSWORD,
-        }).catch((e) => {
-            const msg = e instanceof Error ? e.message : String(e);
-            if (/\[PLAFT\]\[CRITICO\]|\[OFAC\]\[GUARD\]/.test(msg)) {
-                throw e;
-            }
-            console.log(`[PLAFT][WARN] ${msg}`);
-            return null;
-        });
-        if (verificacionPlaft?.mpn) {
-            const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionPlaft.mpn);
-            console.log(`[PLAFT] Caso resuelto en Bizagi para: ${verificacionPlaft.mpn}`);
-            console.log('[Verificaciones] PLAFT requerido aprobado=true');
-            console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
-            return { tipo: 'cumplimiento' as const, mpn: verificacionPlaft.mpn, estado };
-        }
-        throw new Error('[PLAFT][CRITICO] PLAFT detectado pero no se pudo resolver el caso en Bizagi');
-    }
-
-    console.log('[Verificaciones] Resolviendo OFAC');
-    console.log(`[Cumplimiento] mpnVisible='${mpnVisible}'`);
-
     if (mpnVisible && cumplimientoMpnsProcesados.has(mpnVisible)) {
         const estado = await confirmarCumplimientoAprobadoYContinuar(page, mpnVisible);
         console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
         return { tipo: 'cumplimiento' as const, mpn: mpnVisible, estado };
     }
 
-    const verificacionCumplimiento = await abrirSolicitudCumplimientoEnBizagiDesdePortal(page, {
-        password: BIZAGI_PASSWORD,
-    }).catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/\[OFAC\]\[GUARD\]/.test(msg)) {
-            throw e;
-        }
-        console.log(`[Cumplimiento][WARN] ${msg}`);
-        return null;
-    });
-    if (verificacionCumplimiento?.mpn) {
-        cumplimientoMpnsProcesados.add(verificacionCumplimiento.mpn.toUpperCase());
-
-        const estado = await confirmarCumplimientoAprobadoYContinuar(page, verificacionCumplimiento.mpn);
-        console.log(`[Cumplimiento] Solicitud abierta en Bizagi para: ${verificacionCumplimiento.mpn}`);
-        console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
-        return { tipo: 'cumplimiento' as const, mpn: verificacionCumplimiento.mpn, estado };
+    const modoBizagi = await resolverModoBizagiDesdeListasPortal(page);
+    if (ofacPendiente && plaftPendiente && modoBizagi === 'MIXTO') {
+        console.log('[Cumplimiento][Bizagi] OFAC y PLAFT detectados; usando modo MIXTO por Listas');
+        console.log('[Cumplimiento][Bizagi] OFAC y PLAFT detectados; ejecutando Gestionar Coincidencias en modo MIXTO');
     }
 
-    return null;
+    const mpnActual = (mpnVisible || '').toUpperCase();
+    const keyResolucion = `${mpnActual || 'SIN-MPN'}|${modoBizagi}`;
+    if (verificacionesResueltas.has(keyResolucion)) {
+        console.log(`[Cumplimiento][Bizagi][Guard] resolución ya completada key=${keyResolucion}; no duplicar`);
+        const estado = await confirmarCumplimientoAprobadoYContinuar(page, mpnActual || '');
+        return { tipo: 'cumplimiento' as const, mpn: mpnActual || '', estado };
+    }
+    if (verificacionesEnResolucion.has(keyResolucion)) {
+        console.log(`[Cumplimiento][Bizagi][Guard] resolución ya en curso key=${keyResolucion}; no duplicar`);
+        return { tipo: 'cumplimiento' as const, mpn: mpnActual || '' };
+    }
+
+    verificacionesEnResolucion.add(keyResolucion);
+    try {
+        if (modoBizagi === 'MIXTO') {
+            console.log('[Cumplimiento][Bizagi][MIXTO] INICIO resolución completa');
+            console.log(`[Cumplimiento][Bizagi][MIXTO] mpnActual=${mpnActual}`);
+        }
+
+        console.log(`[Cumplimiento][Bizagi] abriendo Gestionar Coincidencias para modo=${modoBizagi} mpnActual=${mpnActual || 'N/A'}`);
+        const bizagiPage = await abrirGestionCoincidenciasBizagiDesdePortalSinProcesar(page, mpnActual, modoBizagi);
+        if (modoBizagi === 'MIXTO') {
+            console.log(`[Cumplimiento][Bizagi][MIXTO] apertura retornó page url=${bizagiPage.url()}`);
+        }
+        console.log(`[Cumplimiento][Bizagi] usando bizagiPage url=${bizagiPage.url()}`);
+        if (modoBizagi === 'MIXTO') {
+            console.log('[Cumplimiento][Bizagi][MIXTO] llamando orquestador nuevo');
+        }
+        console.log(`[Cumplimiento][Bizagi] Llamando completarGestionCoincidenciasBizagiPorModo modo=${modoBizagi}`);
+        const otrasOk = await completarGestionCoincidenciasBizagiPorModo(bizagiPage, modoBizagi);
+        if (modoBizagi === 'MIXTO') {
+            console.log(`[Cumplimiento][Bizagi][MIXTO] orquestador terminó ok=${otrasOk}`);
+            if (!otrasOk) {
+                throw new Error('[Cumplimiento][Bizagi][MIXTO][CRITICO] Orquestador MIXTO retornó false');
+            }
+            console.log('[Cumplimiento][Bizagi][MIXTO] FIN OK');
+            console.log('[Cumplimiento][Bizagi] MIXTO completado desde flujo principal');
+        }
+        console.log(`[Cumplimiento][Bizagi] completarGestionCoincidenciasBizagiPorModo resultado=${otrasOk}`);
+        verificacionesResueltas.add(keyResolucion);
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (modoBizagi === 'MIXTO') {
+            console.log(`[Cumplimiento][Bizagi][MIXTO][CRITICO] ${msg}`);
+        }
+        throw e;
+    } finally {
+        verificacionesEnResolucion.delete(keyResolucion);
+    }
+
+    if (mpnActual) {
+        cumplimientoMpnsProcesados.add(mpnActual);
+    }
+    const estado = await confirmarCumplimientoAprobadoYContinuar(page, mpnActual || '');
+    console.log('[Verificaciones] Todas las verificaciones condicionales aprobadas');
+    return { tipo: 'cumplimiento' as const, mpn: mpnActual || '', estado };
 }
 
 async function intentarAvanceRealHaciaTaller(
@@ -1012,13 +1024,17 @@ async function intentarAvanceRealHaciaTaller(
 
             console.log(`[Producto] Producto agregado como tarjeta final visible=${productoConfirmado}`);
             if (!productoConfirmado) {
-                await diagnosticarPantallaProductoPostAgregar(page, options.tipoCuenta).catch(() => {});
+                await diagnosticarPantallaProductoPostAgregar(page, options.tipoCuenta).catch(() => { });
                 throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
             }
             console.log('[Producto][AvanceReal] producto confirmado; haciendo click en Siguiente/Continuar');
         }
 
-        const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[CRITICO\]/i.test(msg)) throw e;
+            return null;
+        });
         if (verificacionEspecialAntes?.tipo === 'cumplimiento') {
             if (verificacionEspecialAntes.estado === 'post-producto') {
                 console.log(`[Continuar] Cumplimiento dejo pantalla post-producto (${contexto}).`);
@@ -1078,7 +1094,11 @@ async function intentarAvanceRealHaciaTaller(
             }
         }
 
-        const verificacionEspecialDespuesClick = await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionEspecialDespuesClick = await procesarVerificacionesEspeciales(page).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[CRITICO\]/i.test(msg)) throw e;
+            return null;
+        });
         if (verificacionEspecialDespuesClick?.tipo === 'cumplimiento') {
             if (verificacionEspecialDespuesClick.estado === 'post-producto') {
                 console.log(`[Continuar] Cumplimiento dejo pantalla post-producto tras el click (${contexto}).`);
@@ -1093,7 +1113,11 @@ async function intentarAvanceRealHaciaTaller(
         // campos si realmente seguimos en la pantalla pre-productos (hay "Gestión Documental" visible
         // u otros marcadores del formulario). Si ya estamos en la pantalla de productos, no tocar nada.
         if (urlDespuesClic === urlAntesClic) {
-            const verificacionEspecialConUrlIgual = await procesarVerificacionesEspeciales(page).catch(() => null);
+            const verificacionEspecialConUrlIgual = await procesarVerificacionesEspeciales(page).catch((e) => {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (/\[CRITICO\]/i.test(msg)) throw e;
+                return null;
+            });
             if (verificacionEspecialConUrlIgual) {
                 if (verificacionEspecialConUrlIgual.tipo === 'cumplimiento' && verificacionEspecialConUrlIgual.estado === 'post-producto') {
                     console.log(`[Continuar] Cumplimiento dejo pantalla post-producto con URL sin cambio (${contexto}).`);
@@ -1108,6 +1132,23 @@ async function intentarAvanceRealHaciaTaller(
                 console.log(`[Continuar] URL no cambio y seguimos en pantalla previa. Intentando completar campos faltantes...`);
                 const enPostProducto = await asegurarPantallaPostProductoAntesDeTaller(page);
                 if (enPostProducto) {
+                    console.log('[PostProducto] Verificando campos obligatorios antes de Continuar (retry)');
+                    await asegurarTipoDeVivienda(page, (options as any)?.registro);
+                    const labelTipoVivienda = page
+                        .locator('label')
+                        .filter({ hasText: /^Tipo de vivienda$/i })
+                        .first()
+                        .locator('xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown"]][1]')
+                        .locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]')
+                        .first();
+                    const valorFinal = (
+                        (await labelTipoVivienda.textContent().catch(() => '')) ||
+                        (await labelTipoVivienda.getAttribute('aria-label').catch(() => '')) ||
+                        ''
+                    ).replace(/\s+/g, ' ').trim();
+                    if (!valorFinal || /Seleccione|Seleccionar/i.test(valorFinal)) {
+                        throw new Error(`[TipoVivienda][CRITICO] Tipo de vivienda sigue vacío antes de Continuar. valor='${valorFinal}'`);
+                    }
                     const completoCampos = await asegurarPostProductoCompletoUnaVez(
                         page,
                         (options as any)?.registro ?? null,
@@ -1216,6 +1257,8 @@ const PRODUCTO_WAIT_CONFIRM_MS = FAST_UI ? 1400 : 2500;
 const PRODUCTO_RETRY_WAIT_MS = FAST_UI ? 600 : 1200;
 const FINALIZACION_MAX_INTENTOS = FAST_UI ? 5 : 7;
 const FINALIZACION_TIMEOUT_MS = FAST_UI ? 90000 : 120000;
+const BIZAGI_URL = process.env.BIZAGI_URL || 'https://test-bscrd-santacruz.bizagi.com/';
+const BIZAGI_USER = process.env.BIZAGI_USER || 'domain\\admon';
 const BIZAGI_PASSWORD = "H0la1234.";
 
 const randomTexto = (prefijo: string) =>
@@ -1383,7 +1426,11 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
     }
 
     for (let intento = 1; intento <= maxIntentos; intento++) {
-        const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[CRITICO\]/i.test(msg)) throw e;
+            return null;
+        });
         if (verificacionEspecialAntes) {
             console.log(`[GestionDoc] Verificacion especial detectada (${verificacionEspecialAntes.tipo}) antes de reintentar Continuar.`);
             return true;
@@ -1394,7 +1441,11 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
             contexto: `reintento ${intento}/${maxIntentos}`,
         });
         if (!clicContinuar) {
-            const verificacionEspecialSinClick = await procesarVerificacionesEspeciales(page).catch(() => null);
+            const verificacionEspecialSinClick = await procesarVerificacionesEspeciales(page).catch((e) => {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (/\[CRITICO\]/i.test(msg)) throw e;
+                return null;
+            });
             if (verificacionEspecialSinClick) {
                 console.log(`[GestionDoc] Verificacion especial detectada (${verificacionEspecialSinClick.tipo}) al fallar el click en Continuar.`);
                 return true;
@@ -1528,7 +1579,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                     .first();
                 const enviandoVisible = await modalGestionEnviando.getByText(/Enviando documento/i).first().isVisible().catch(() => false);
                 const modalVisible = await modalGestionEnviando.isVisible().catch(() => false);
-                
+
                 if (!enviandoVisible && !modalVisible) {
                     console.log(`[GestionDoc] Modal y texto desaparecieron en el seg ${s}.`);
                     break;
@@ -1536,7 +1587,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                     console.log(`[GestionDoc] Texto "Enviando" desaparecio en el seg ${s}, pero modal sigue visible.`);
                     break;
                 }
-                
+
                 if (s % 5 === 0) console.log(`[GestionDoc] Esperando cierre de subida... seg ${s}/${maxEsperaS}. modal=${modalVisible} enviando=${enviandoVisible}`);
                 await page.waitForTimeout(1000);
             }
@@ -1651,21 +1702,21 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                     const estrategiasAbrir = [
                         async () => {
                             const trigger = categoriDropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
-                            if(await trigger.isVisible().catch(() => false)) { await trigger.click({ force: true }).catch(() => {}); return true; }
+                            if (await trigger.isVisible().catch(() => false)) { await trigger.click({ force: true }).catch(() => { }); return true; }
                             return false;
                         },
                         async () => {
                             const combo = categoriDropdown.locator('[role="combobox"]').first();
-                            if(await combo.isVisible().catch(() => false)) { await combo.click({ force: true }).catch(() => {}); return true; }
+                            if (await combo.isVisible().catch(() => false)) { await combo.click({ force: true }).catch(() => { }); return true; }
                             return false;
                         },
                         async () => {
-                            if(await categoriDropdown.isVisible().catch(() => false)) { await categoriDropdown.click({ force: true }).catch(() => {}); return true; }
+                            if (await categoriDropdown.isVisible().catch(() => false)) { await categoriDropdown.click({ force: true }).catch(() => { }); return true; }
                             return false;
                         },
                         async () => {
                             const input = categoriDropdown.locator('input').first();
-                            if(await input.isVisible().catch(() => false)) { await input.focus().catch(() => {}); await pageRef.keyboard.press('ArrowDown').catch(() => {}); return true; }
+                            if (await input.isVisible().catch(() => false)) { await input.focus().catch(() => { }); await pageRef.keyboard.press('ArrowDown').catch(() => { }); return true; }
                             return false;
                         },
                     ];
@@ -1772,7 +1823,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                         return false;
                     }
 
-// Ejecutar etapa post-selección
+                    // Ejecutar etapa post-selección
                     const seccionProductos = await localizarSeccionProductos(pageRef).catch(() => pageRef.locator('body'));
                     const registroParaPost = registro ? registro : { tipoCuenta, identificacion: '', relacionado: '', cedRelacionado: '', filaOriginal: 0 } as unknown as RegistroExcel;
                     await etapaSeccionProductosPostSeleccion(pageRef, registroParaPost, seccionProductos).catch(() => { });
@@ -1817,7 +1868,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                         throw new Error(`[Producto][CRITICO] Ruta Producto sin registro/tipoCuenta. No se permite fallback a 200. registro=${registro?.identificacion ?? 'N/A'}, tipoCuenta=${registro?.tipoCuenta ?? 'N/A'}`);
                     }
 
-// Validar si producto ya está agregado
+                    // Validar si producto ya está agregado
                     const tipoDesdeExcel = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '').then(t => {
                         // Usar registro.tipoCuenta si está disponible
                         const tipoObj = registro?.tipoCuenta?.trim();
@@ -2017,7 +2068,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                             }
                         }
 
-// Post-selección (común a ambas rutas)
+                        // Post-selección (común a ambas rutas)
                         const seccionParaPostSeleccion = seccion ?? await localizarSeccionProductos(page);
                         await etapaSeccionProductosPostSeleccion(page, registro, seccionParaPostSeleccion);
 
@@ -2050,7 +2101,11 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                 return true;
             }
 
-            const verificacionEspecialDespues = await procesarVerificacionesEspeciales(page).catch(() => null);
+            const verificacionEspecialDespues = await procesarVerificacionesEspeciales(page).catch((e) => {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (/\[CRITICO\]/i.test(msg)) throw e;
+                return null;
+            });
             if (verificacionEspecialDespues) {
                 console.log(`[GestionDoc] Verificacion especial detectada (${verificacionEspecialDespues.tipo}) despues del intento post-adjunto.`);
                 return true;
@@ -2220,7 +2275,7 @@ async function localizarSeccionProductosLegacy(page: Page) {
         if (!/product/i.test(txt) && !/categor/i.test(txt)) continue;
         const drops = await el.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').count().catch(() => 0);
         if (drops >= 2) {
-            console.log(`[localizarSeccionProductos] Fallback match con ${drops} dropdowns (texto: "${txt.substring(0, 60).replace(/\s+/g,' ')}")`);
+            console.log(`[localizarSeccionProductos] Fallback match con ${drops} dropdowns (texto: "${txt.substring(0, 60).replace(/\s+/g, ' ')}")`);
             return el;
         }
     }
@@ -2433,7 +2488,7 @@ async function seleccionarOpcionEnDropdownDirecto(
     const LIST_PANEL_TIMEOUT_LOCAL = 8000;
     const LIST_PANEL_QUICK_LOCAL = 3000;
 
-    await dropdown.scrollIntoViewIfNeeded().catch(() => {});
+    await dropdown.scrollIntoViewIfNeeded().catch(() => { });
 
     // Abrir dropdown con varias estrategias
     let panelAbierto = false;
@@ -2500,7 +2555,7 @@ async function seleccionarOpcionEnDropdownDirecto(
 
     // Loguear opciones visibles
     const items = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"], .p-select-option');
-    await items.first().waitFor({ state: 'visible', timeout: LIST_PANEL_TIMEOUT_LOCAL }).catch(() => {});
+    await items.first().waitFor({ state: 'visible', timeout: LIST_PANEL_TIMEOUT_LOCAL }).catch(() => { });
     const countItems = await items.count().catch(() => 0);
     const opcionesVisibles: string[] = [];
     for (let i = 0; i < Math.min(countItems, 15); i++) {
@@ -3114,9 +3169,9 @@ async function clickDepurarRobusto(page: Page, motivo = "") {
     await btnDepurar.click({ force: true, noWaitAfter: true }).catch(async () => {
         await btnDepurar.click({ noWaitAfter: true }).catch(() => { });
     });
-    
+
     await esperarFinConsultaSolicitante(page, 120000);
-    await esperarFinActualizandoSolicitud(page, 45000).catch(() => {});
+    await esperarFinActualizandoSolicitud(page, 45000).catch(() => { });
 
     // After spinner clears, the portal may navigate to /requests/{id}/edit.
     // Wait up to 4s for a URL change; if none happens, we stayed on the same page (e.g. validation error).
@@ -3150,11 +3205,11 @@ async function detectarYCerrarClienteProspectoNoProcesable(page: Page): Promise<
     const cerrar = modal.getByRole('button', { name: /Cerrar/i }).first();
     if (await cerrar.isVisible({ timeout: 1000 }).catch(() => false)) {
         await cerrar.click();
-        await modal.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+        await modal.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => { });
         console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado');
     } else {
-        await page.keyboard.press('Escape').catch(() => {});
-        await modal.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
+        await page.keyboard.press('Escape').catch(() => { });
+        await modal.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => { });
         console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado con Escape/fallback');
     }
 
@@ -4518,6 +4573,246 @@ async function completarCamposTextoOtrasInformaciones(page: Page) {
     return true;
 }
 
+async function seleccionarDropdownPorLabelConReintento(
+    page: Page,
+    labelRegex: RegExp,
+    valorPreferido: string,
+    logPrefix: string
+): Promise<string> {
+    const label = page.locator('label').filter({ hasText: labelRegex }).first();
+    await label.waitFor({ state: 'visible', timeout: 15000 });
+
+    let scope = label
+        .locator('xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or contains(@class,"p-select")]][1]')
+        .first();
+
+    let dropdown: Locator;
+
+    if (await scope.isVisible().catch(() => false)) {
+        dropdown = scope
+            .locator('div.p-dropdown, [data-pc-name="dropdown"], .p-select')
+            .first();
+    } else {
+        console.log(`${logPrefix} Scope por ancestor no encontrado; usando fallback por dropdown cercano`);
+
+        const labelBox = await label.boundingBox();
+
+        if (!labelBox) {
+            throw new Error(`${logPrefix} No se pudo obtener boundingBox del label`);
+        }
+
+        const candidatos = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, .p-select:visible');
+        const total = await candidatos.count().catch(() => 0);
+
+        let mejorIndex = -1;
+        let mejorScore = Number.POSITIVE_INFINITY;
+
+        for (let i = 0; i < total; i++) {
+            const candidato = candidatos.nth(i);
+            const box = await candidato.boundingBox().catch(() => null);
+
+            if (!box) continue;
+
+            const texto = (
+                (await candidato.locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]').first().textContent().catch(() => '')) ||
+                (await candidato.locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]').first().getAttribute('aria-label').catch(() => '')) ||
+                ''
+            ).replace(/\s+/g, ' ').trim();
+
+            const debajo = box.y >= labelBox.y;
+            const distanciaY = Math.abs(box.y - labelBox.y);
+            const distanciaX = Math.abs(box.x - labelBox.x);
+            const score = distanciaY * 10 + distanciaX;
+
+            console.log(`${logPrefix} candidato dropdown[${i}] texto='${texto}' x=${box.x} y=${box.y} debajo=${debajo} score=${score}`);
+
+            if (debajo && score < mejorScore) {
+                mejorScore = score;
+                mejorIndex = i;
+            }
+        }
+
+        if (mejorIndex < 0) {
+            throw new Error(`${logPrefix} No se encontró dropdown cercano al label`);
+        }
+
+        dropdown = candidatos.nth(mejorIndex);
+    }
+
+    await dropdown.waitFor({ state: 'visible', timeout: 10000 });
+
+    console.log(`${logPrefix} Dropdown localizado`);
+
+    const retryLocal = scope.locator(
+        'div.p-inputgroup:has-text("Reintentar buscar lista") button, button:has-text("Reintentar buscar lista"), button:has-text("Reintentar"), button[aria-label*="Reintentar"]'
+    ).first();
+
+    if (await retryLocal.isVisible().catch(() => false)) {
+        console.log(`${logPrefix} Reintentando carga de lista`);
+        await retryLocal.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(1000);
+    }
+
+    const labelValor = dropdown
+        .locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]')
+        .first();
+
+    const valorInicial = (
+        (await labelValor.textContent().catch(() => '')) ||
+        (await labelValor.getAttribute('aria-label').catch(() => '')) ||
+        ''
+    ).replace(/\s+/g, ' ').trim();
+
+    console.log(`${logPrefix} valor inicial='${valorInicial}'`);
+
+    if (valorInicial && !/Seleccione|Seleccionar|^\s*$/.test(valorInicial)) {
+        console.log(`${logPrefix} ya tiene valor='${valorInicial}'`);
+        return valorInicial;
+    }
+
+    for (let intento = 1; intento <= 5; intento++) {
+        console.log(`${logPrefix} seleccionando '${valorPreferido}' intento=${intento}/5`);
+
+        await dropdown.scrollIntoViewIfNeeded().catch(() => { });
+
+        const panelAbierto = page
+            .locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible')
+            .last();
+
+        if (!(await panelAbierto.isVisible().catch(() => false))) {
+            const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+
+            if (await trigger.isVisible().catch(() => false)) {
+                await trigger.click({ force: true });
+            } else {
+                await dropdown.click({ force: true });
+            }
+        }
+
+        await page.waitForTimeout(300);
+
+        const panel = page
+            .locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible')
+            .last();
+
+        await panel.waitFor({ state: 'visible', timeout: 5000 });
+
+        const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+        await opciones.first().waitFor({ state: 'visible', timeout: 5000 });
+
+        const total = await opciones.count().catch(() => 0);
+        console.log(`${logPrefix} opciones visibles=${total}`);
+
+        let opcionFallback: Locator | null = null;
+
+        for (let i = 0; i < total; i++) {
+            const op = opciones.nth(i);
+            const txt = ((await op.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            const aria = ((await op.getAttribute('aria-label').catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            const visible = await op.isVisible().catch(() => false);
+
+            console.log(`${logPrefix} opcion[${i}] text='${txt}' aria='${aria}' visible=${visible}`);
+
+            const texto = txt || aria;
+
+            if (!opcionFallback && visible && texto && !/Seleccione|Seleccionar/i.test(texto)) {
+                opcionFallback = op;
+            }
+
+            if (new RegExp(`^${valorPreferido}$`, 'i').test(texto)) {
+                try {
+                    await op.scrollIntoViewIfNeeded().catch(() => { });
+                    await op.click({ force: true, timeout: 3000 });
+                    await page.waitForTimeout(600);
+
+                    const finalExacto = (
+                        (await labelValor.textContent().catch(() => '')) ||
+                        (await labelValor.getAttribute('aria-label').catch(() => '')) ||
+                        ''
+                    ).replace(/\s+/g, ' ').trim();
+
+                    console.log(`${logPrefix} valor final='${finalExacto}'`);
+
+                    if (new RegExp(valorPreferido, 'i').test(finalExacto)) {
+                        return finalExacto;
+                    }
+                } catch (e) {
+                    console.log(`${logPrefix} WARN opción detached/stale. Reintentando. Error=${String(e)}`);
+                    await page.keyboard.press('Escape').catch(() => { });
+                    await page.waitForTimeout(400);
+                    break;
+                }
+            }
+        }
+
+        if (opcionFallback) {
+            try {
+                console.log(`${logPrefix} valor preferido no encontrado; usando primera opción válida`);
+                await opcionFallback.click({ force: true, timeout: 3000 });
+                await page.waitForTimeout(600);
+
+                const finalFallback = (
+                    (await labelValor.textContent().catch(() => '')) ||
+                    (await labelValor.getAttribute('aria-label').catch(() => '')) ||
+                    ''
+                ).replace(/\s+/g, ' ').trim();
+
+                console.log(`${logPrefix} valor final fallback='${finalFallback}'`);
+
+                if (finalFallback && !/Seleccione|Seleccionar/i.test(finalFallback)) {
+                    return finalFallback;
+                }
+            } catch (e) {
+                console.log(`${logPrefix} WARN fallback detached/stale. Reintentando. Error=${String(e)}`);
+            }
+        }
+
+        await page.keyboard.press('Escape').catch(() => { });
+        await page.waitForTimeout(500);
+    }
+
+    throw new Error(`${logPrefix} No se pudo seleccionar valor para dropdown`);
+}
+
+async function asegurarTipoDeVivienda(page: Page, data?: any): Promise<void> {
+    const valorExcel =
+        String(
+            data?.tipoVivienda ??
+            data?.['Tipo de vivienda'] ??
+            data?.vivienda ??
+            ''
+        ).trim();
+
+    const valor = valorExcel || 'Propia';
+
+    const visible = await page
+        .locator('label')
+        .filter({ hasText: /^Tipo de vivienda$/i })
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+    if (!visible) {
+        console.log('[TipoVivienda] Label no visible; no aplica en esta pantalla');
+        return;
+    }
+
+    console.log(`[TipoVivienda] Asegurando Tipo de vivienda valor='${valor}'`);
+
+    const seleccionado = await seleccionarDropdownPorLabelConReintento(
+        page,
+        /^Tipo de vivienda$/i,
+        valor,
+        '[TipoVivienda]'
+    );
+
+    if (!seleccionado || /Seleccione|Seleccionar/i.test(seleccionado)) {
+        throw new Error(`[TipoVivienda][CRITICO] Tipo de vivienda no quedó seleccionado. valor='${seleccionado}'`);
+    }
+
+    console.log(`[TipoVivienda] Tipo de vivienda seleccionado='${seleccionado}'`);
+}
+
 async function asegurarDireccionEnCorrespondencia(page: Page) {
     const titulo = page.getByText(/Correspondencia/i).first();
     const visibleTitulo = await titulo.isVisible().catch(() => false);
@@ -5042,7 +5337,7 @@ async function completarDireccionPostProducto(page: Page) {
                 el.dispatchEvent(new Event('change', { bubbles: true }));
             }, 'Referencia automatizada');
         });
-        await campoRef.blur().catch(() => {});
+        await campoRef.blur().catch(() => { });
 
         // Leer valor final
         const esInput = await campoRef.evaluate(el => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA').catch(() => true);
@@ -5330,7 +5625,11 @@ async function completarInformacionClientePostProductoAntesDeTaller(
         const inicioOtrasInfo = Date.now();
         await completarDropdownsVaciosIndex0EnSeccion(page, /Otras informaciones/i);
         await completarCamposTextoOtrasInformaciones(page);
-        console.log(`[PostProducto][Tiempo] Otras informaciones listas en ${Date.now() - inicioOtrasInfo}ms`);
+        console.log('[PostProducto] Verificando campos obligatorios antes de Continuar');
+        await asegurarTipoDeVivienda(page, registro);
+        await page.waitForTimeout(500);
+        await page.getByText(/^Es requerido$/i).first().waitFor({ state: 'hidden', timeout: 3000 }).catch(() => { });
+        console.log(`[PostProducto][Tiempo] Otras informations listas en ${Date.now() - inicioOtrasInfo}ms`);
     }
 
     const pepTitulo = page.getByText(/Informaci(?:o|\u00f3)n PEP|PEP/i).first();
@@ -5387,20 +5686,20 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             }
 
             if (!/\/requests\/create\/multiproduct/i.test(page.url())) {
-            const btnSolicitudMultiproducto = page
-                .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
-                .first();
+                const btnSolicitudMultiproducto = page
+                    .locator('li[aria-label="Solicitud multiproducto"] a[data-pc-section="action"]:visible')
+                    .first();
 
-            const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
-                .waitFor({ state: 'visible', timeout: 4000 })
-                .then(() => true)
-                .catch(() => false);
+                const puedeAbrirSolicitudMultiproducto = await btnSolicitudMultiproducto
+                    .waitFor({ state: 'visible', timeout: 4000 })
+                    .then(() => true)
+                    .catch(() => false);
 
-            if (puedeAbrirSolicitudMultiproducto) {
-                await btnSolicitudMultiproducto.click({ force: true });
-                await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 60000 });
-                await page.waitForLoadState('domcontentloaded');
-            }
+                if (puedeAbrirSolicitudMultiproducto) {
+                    await btnSolicitudMultiproducto.click({ force: true });
+                    await page.waitForURL(/\/requests\/create\/multiproduct/i, { timeout: 60000 });
+                    await page.waitForLoadState('domcontentloaded');
+                }
             }
         }
 
@@ -5484,17 +5783,17 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
             } else {
                 await clickDepurarRobusto(page, 'fecha invalida');
 
-            const mpnCasoActivo2 = await extraerCasoActivoMpn(page);
-            if (mpnCasoActivo2) {
-                console.log(`[CasoActivo] Detectado ${mpnCasoActivo2} en segundo depurar. Cancelando en Bizagi...`);
-                await cancelarCasoEnBizagiDesdePortal(page, mpnCasoActivo2, { password: BIZAGI_PASSWORD });
-                if (intento >= maxIntentosCasoActivo) {
-                    throw new Error(`[CRITICO] Se cancelÃ³ ${mpnCasoActivo2} pero el caso activo persiste para '${registro.identificacion}'.`);
+                const mpnCasoActivo2 = await extraerCasoActivoMpn(page);
+                if (mpnCasoActivo2) {
+                    console.log(`[CasoActivo] Detectado ${mpnCasoActivo2} en segundo depurar. Cancelando en Bizagi...`);
+                    await cancelarCasoEnBizagiDesdePortal(page, mpnCasoActivo2, { password: BIZAGI_PASSWORD });
+                    if (intento >= maxIntentosCasoActivo) {
+                        throw new Error(`[CRITICO] Se cancelÃ³ ${mpnCasoActivo2} pero el caso activo persiste para '${registro.identificacion}'.`);
+                    }
+                    console.log(`[CasoActivo] ${mpnCasoActivo2} cancelado. Reintentando con la misma cÃ©dula (${registro.identificacion})...`);
+                    await page.waitForTimeout(500);
+                    continue;
                 }
-                console.log(`[CasoActivo] ${mpnCasoActivo2} cancelado. Reintentando con la misma cÃ©dula (${registro.identificacion})...`);
-                await page.waitForTimeout(500);
-                continue;
-            }
             }
         }
 
@@ -6280,7 +6579,7 @@ async function asegurarProductoConfirmadoAntesDeContinuar(page: Page, registro: 
 
     console.log(`[Producto] Producto agregado como tarjeta final visible=${productoVisible}`);
     if (!productoVisible) {
-        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
+        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => { });
         throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
     }
 
@@ -6676,7 +6975,7 @@ async function seleccionarProductoEnSeccionProductos(
         return true;
     };
 
-const seleccionProductoOk = await Promise.race([
+    const seleccionProductoOk = await Promise.race([
         seleccionFn(),
         timeoutFn(),
     ]).catch((e) => {
@@ -6788,6 +7087,29 @@ const seleccionProductoOk = await Promise.race([
     let estadoProducto = await validarProductoSeleccionado();
     console.log(`[Producto][Seleccion] valorProductoDespues='${estadoProducto.valor}'`);
 
+    // Validar que el dropdown Producto tiene el valor esperado
+    const dropdownsSeccion = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+    const countDropdowns = await dropdownsSeccion.count().catch(() => 0);
+    let textoCategoria = '';
+    let textoProducto = '';
+    if (countDropdowns >= 1) {
+        const labelCat = dropdownsSeccion.nth(0).locator('.p-dropdown-label, [data-pc-section="label"]').first();
+        textoCategoria = ((await labelCat.textContent().catch(() => '')) || '').trim();
+    }
+    if (countDropdowns >= 2) {
+        const labelProd = dropdownsSeccion.nth(1).locator('.p-dropdown-label, [data-pc-section="label"]').first();
+        textoProducto = ((await labelProd.textContent().catch(() => '')) || '').trim();
+    }
+    console.log(`[Producto][Seleccion] Categoria final='${textoCategoria}'`);
+    console.log(`[Producto][Seleccion] Producto final='${textoProducto}'`);
+
+    // Validar que el producto está seleccionado antes de continuar
+    const tipoNorm = tipoCuenta.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const productoNormalizado = textoProducto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!productoNormalizado.includes(tipoNorm.substring(0, 15)) && !textoProducto.includes(tipoCuenta.split('-')[0].trim())) {
+        console.log(`[Producto][Seleccion][WARN] Producto no quedó seleccionado correctamente. valor='${textoProducto}'. Reintentando.`);
+    }
+
     const modalProductoAbierto = await modalConfiguracionProductoVisible(page).catch(() => false);
     if (modalProductoAbierto) {
         console.log('[Producto][Seleccion] modal de configuración visible; producto seleccionado correctamente aunque dropdown visual esté vacío');
@@ -6801,7 +7123,7 @@ const seleccionProductoOk = await Promise.race([
             const seccion = await localizarSeccionProductos(page).catch(() => page.locator('body'));
             const dropdowns = seccion.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
             const dropdownProducto = dropdowns.nth(1);
-            await dropdownProducto.click({ force: true }).catch(() => {});
+            await dropdownProducto.click({ force: true }).catch(() => { });
             await page.waitForTimeout(400);
             const panel = page.locator('.p-dropdown-panel:visible, [data-pc-section="panel"]:visible').first();
             const panelVisible = await panel.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
@@ -6841,12 +7163,12 @@ const seleccionProductoOk = await Promise.race([
             }
             if (matchIndex >= 0) {
                 console.log(`[Producto][Seleccion] match encontrado='${opciones[matchIndex]}'`);
-                await items.nth(matchIndex).click({ force: true }).catch(() => {});
+                await items.nth(matchIndex).click({ force: true }).catch(() => { });
                 await page.waitForTimeout(300);
-                await page.keyboard.press('Escape').catch(() => {});
+                await page.keyboard.press('Escape').catch(() => { });
                 break;
             }
-            await page.keyboard.press('Escape').catch(() => {});
+            await page.keyboard.press('Escape').catch(() => { });
             await page.waitForTimeout(200);
             estadoProducto = await validarProductoSeleccionado();
             console.log(`[Producto][Seleccion] valorProductoDespuesReintento${intento}='${estadoProducto.valor}'`);
@@ -6960,14 +7282,27 @@ async function esperarProductoFinalVisibleDespuesDeConfirmacion(
             senalesConsecutivas = 0;
         }
 
-await page.waitForTimeout(700);
+        await page.waitForTimeout(700);
     }
 
     console.log(`[Producto][PostAgregar][Poll] timeout alcanzado sin señales consistentes`);
     return false;
 }
 
-async function diagnosticarPantallaProductoPostAgregar(page: Page, tipoCuenta: string) {
+async function diagnosticarPantallaProductoPostAgregar(page: Page, tipoCuenta: string): Promise<{
+    modalVisible: boolean;
+    seccionVisible: boolean;
+    codigoVisible: boolean;
+    nombreParcialVisible: boolean;
+    tarjetasDetectadas: number;
+    tieneBotonesEditarEliminar: boolean;
+    mensajeVacioBloqueante: boolean;
+    tarjetaProductoDetectada: boolean;
+    textoProductos: string;
+    textoRelacionados: string;
+    productoDropdownActual: string;
+    tarjetasProducto: number;
+}> {
     console.log(`[Producto][Diagnostico] dumping state post-confirmacion para tipoCuenta='${tipoCuenta}'`);
     const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
     const seccion = await localizarSeccionProductos(page).catch(() => null);
@@ -7019,9 +7354,76 @@ async function diagnosticarPantallaProductoPostAgregar(page: Page, tipoCuenta: s
         mensajeVacioBloqueante = mensajeVacioEsDeRelacionados && !tarjetaProductoDetectada;
     }
 
-console.log(`[Producto][Diagnostico] modalVisible=${modalVisible} seccionVisible=${seccionVisible} dropdownCat=${tieneDropdownCategoria} dropdownProd=${tieneDropdownProducto}`);
+    // Diagnóstico separado para Productos vs Relacionados
+    let textoProductos = '';
+    let textoRelacionados = '';
+    let productoDropdownActual = '';
+    let tarjetasProducto = 0;
+    let botonesProductoEditarEliminar = false;
+
+    if (seccion && seccionVisible) {
+        // Separar texto de Productos y Relacionados
+        const posicionProductos = textoScope.toLowerCase().indexOf('producto');
+        const posicionRelacionadosIdx = textoScope.toLowerCase().indexOf('relacionados');
+
+        if (posicionProductos >= 0 && posicionRelacionadosIdx > posicionProductos) {
+            textoProductos = textoScope.substring(posicionProductos, posicionRelacionadosIdx).trim();
+            textoRelacionados = textoScope.substring(posicionRelacionadosIdx).trim();
+        } else {
+            textoProductos = textoScope;
+        }
+
+        // Mejorar detección de tarjeta producto
+        const tieneNombreEnTextoProductos = /NOMBRE\s+Cuentas de Ahorros/i.test(textoProductos);
+        const tieneMonedaEnTextoProductos = /MONEDA\s+DOP/i.test(textoProductos);
+        const tieneBalanceEnTextoProductos = /BALANCE PROMEDIO/i.test(textoProductos);
+
+        // Si hay señales claras en textoProductos, marcar como detectada
+        if (tieneNombreEnTextoProductos && (tieneMonedaEnTextoProductos || tieneBalanceEnTextoProductos)) {
+            console.log('[Producto][Diagnostico] tarjeta detectada por señales positivas de textoProductos');
+            tarjetaProductoDetectada = true;
+        }
+
+        // Valor actual del dropdown Producto
+        const dropdownsSeccionDiag = seccion.locator('.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const countDropdownsDiag = await dropdownsSeccionDiag.count().catch(() => 0);
+        if (countDropdownsDiag >= 2) {
+            const labelProd = dropdownsSeccionDiag.nth(1).locator('.p-dropdown-label, [data-pc-section="label"]').first();
+            productoDropdownActual = ((await labelProd.textContent().catch(() => '')) || '').trim();
+        }
+
+        // Tarjetas de producto (excluir Relacionados)
+        tarjetasProducto = await seccion.locator('.p-card:visible, [class*="p-card-content"]:visible')
+            .filter({ hasNotText: /No se han encontrado resultados/i })
+            .count()
+            .catch(() => 0);
+
+        // Botones de editar/eliminar del producto
+        botonesProductoEditarEliminar = await seccion.locator('button:has(i.pi-trash), button:has(i.pi-pencil), button:has-text("Eliminar"), button:has-text("Editar")').first().isVisible().catch(() => false);
+    }
+
+    console.log(`[Producto][Diagnostico] modalVisible=${modalVisible} seccionVisible=${seccionVisible} dropdownCat=${tieneDropdownCategoria} dropdownProd=${tieneDropdownProducto}`);
     console.log(`[Producto][Diagnostico] codigoVisible=${codigoVisible} nombreParcialVisible=${nombreParcialVisible} tarjetasDetectadas=${tarjetasDetectadas} tieneBotonesEditarEliminar=${tieneBotonesEditarEliminar} mensajeVacioBloqueante=${mensajeVacioBloqueante} tarjetaProductoDetectada=${tarjetaProductoDetectada}`);
     console.log(`[Producto][Diagnostico] textoScope='${textoScope.replace(/\s+/g, ' ').trim().slice(0, 300)}...'`);
+    console.log(`[Producto][Diagnostico] textoProductos='${textoProductos.replace(/\s+/g, ' ').trim().slice(0, 200)}...'`);
+    console.log(`[Producto][Diagnostico] textoRelacionados='${textoRelacionados.replace(/\s+/g, ' ').trim().slice(0, 100)}...'`);
+    console.log(`[Producto][Diagnostico] productoDropdownActual='${productoDropdownActual}'`);
+    console.log(`[Producto][Diagnostico] tarjetasProducto=${tarjetasProducto} botonesProductoEditarEliminar=${botonesProductoEditarEliminar}`);
+
+    return {
+        modalVisible,
+        seccionVisible,
+        codigoVisible,
+        nombreParcialVisible,
+        tarjetasDetectadas,
+        tieneBotonesEditarEliminar,
+        mensajeVacioBloqueante,
+        tarjetaProductoDetectada,
+        textoProductos,
+        textoRelacionados,
+        productoDropdownActual,
+        tarjetasProducto,
+    };
 }
 
 async function etapaSeccionProductosPostSeleccion(
@@ -7088,7 +7490,7 @@ async function etapaSeccionProductosPostSeleccion(
             return;
         }
 
-        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
+        await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => { });
         throw new Error(`[Producto][CRITICO] Producto marcado como procesado pero tarjeta no visible al reentrar etapa producto. key=${keyProducto}`);
     }
 
@@ -7302,6 +7704,22 @@ async function etapaSeccionProductosPostSeleccion(
         const visible = await modalProducto.isVisible().catch(() => false);
         if (!visible) return true;
 
+        console.log('[Producto][Modal] Modal Cuentas de efectivo visible');
+
+        // Validar que el modal no tenga campos requeridos antes de confirmar
+        const erroresModal = await modalProducto.locator('text=/Es requerido|Requerido|obligatorio/i').count().catch(() => 0);
+        if (erroresModal > 0) {
+            console.log(`[Producto][Modal][CRITICO] Modal tiene ${erroresModal} campos requeridos antes de confirmar`);
+            throw new Error('[Producto][Modal][CRITICO] Modal tiene campos requeridos antes de confirmar');
+        }
+
+        // Log de valores del modal
+        const balanceText = ((await modalProducto.getByText(/Balance promedio/i).first().isVisible().catch(() => false)) ? 'presente' : 'no presente');
+        const monedaText = ((await modalProducto.getByText(/Moneda/i).first().isVisible().catch(() => false)) ? 'presente' : 'no presente');
+        const tasaText = ((await modalProducto.getByText(/Tasa/i).first().isVisible().catch(() => false)) ? 'presente' : 'no presente');
+        console.log(`[Producto][Modal] Balance promedio=${balanceText} Moneda=${monedaText} Tasa=${tasaText}`);
+
+        console.log('[Producto][Modal] Click confirmar modal');
         const botones = [
             modalProducto.getByRole('button', { name: /^Aceptar$/i }).first(),
             modalProducto.locator('button:has-text("Aceptar")').first(),
@@ -7321,9 +7739,13 @@ async function etapaSeccionProductosPostSeleccion(
             const hidden = await modalProducto.waitFor({ state: 'hidden', timeout: FAST_UI ? 2500 : 6000 })
                 .then(() => true)
                 .catch(() => false);
-            if (hidden) return true;
+            if (hidden) {
+                console.log('[Producto][Modal] Modal cerrado después de confirmar');
+                return true;
+            }
         }
 
+        console.log('[Producto][Modal] Modal no se cerró correctamente');
         return !(await modalProducto.isVisible().catch(() => false));
     };
 
@@ -7494,6 +7916,36 @@ async function etapaSeccionProductosPostSeleccion(
             console.log('[Producto][PostAgregar] Confirmación aceptada; esperando tarjeta final con polling...');
             const aparecioConPolling = await esperarProductoFinalVisibleDespuesDeConfirmacion(page, registro.tipoCuenta, 15000);
             console.log(`[Producto][PostAgregar] aparecioConPolling=${aparecioConPolling}`);
+
+            // Reintento único si el modal cierra pero no agrega
+            if (!aparecioConPolling && intentoProducto === 1) {
+                console.log('[Producto][PostAgregar][Retry] Producto no quedó agregado; reintentando una vez');
+                console.log('[Producto][PostAgregar][Retry] Re-seleccionando producto');
+
+                // Re-seleccionar el producto
+                await seleccionarProductoEnSeccionProductos(page, seccionProductos, registro).catch(() => { });
+                await page.waitForTimeout(FAST_UI ? 500 : 1200);
+
+                // Re-abrir y re-confirmar modal
+                console.log('[Producto][PostAgregar][Retry] Reconfirmando modal');
+                const modalNuevaVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+                if (modalNuevaVisible) {
+                    await cerrarModalProductoConAceptar().catch(() => false);
+                    await page.waitForTimeout(FAST_UI ? 800 : 1500);
+
+                    const aparecioRetry = await esperarProductoVisibleTrasAgregar().catch(() => false);
+                    if (aparecioRetry) {
+                        console.log('[Producto][PostAgregar][Retry] Producto apareció después del retry');
+                        productoAgregado = true;
+                        marcarProductoConfirmado(registro);
+                        const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+                        productoProcesadoPorRegistro.add(keyAhora);
+                        console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                        break;
+                    }
+                }
+            }
+
             if (aparecioConPolling) {
                 console.log('[Producto] Producto apareció después de confirmación aceptada');
                 productoAgregado = true;
@@ -7503,9 +7955,23 @@ async function etapaSeccionProductosPostSeleccion(
                 console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
                 break;
             } else {
-                console.log('[Producto][PostAgregar][WARN] Confirmación aceptada pero tarjeta final no apareció después de 15s');
-                await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch(() => {});
-                throw new Error(`[CRITICO] Confirmación aceptada pero producto '${registro.tipoCuenta}' no visible en UI después de esperar 15s.`);
+                console.log('[Producto][PostAgregar][WARN] Confirmación aceptada pero polling inicial no detectó tarjeta; ejecutando diagnóstico final');
+                const diagnosticoFinal = await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch((e) => {
+                    console.log(`[Producto][PostAgregar][WARN] diagnóstico final falló: ${String(e)}`);
+                    return null;
+                });
+
+                if (diagnosticoFinal?.tarjetaProductoDetectada || diagnosticoFinal?.nombreParcialVisible || diagnosticoFinal?.tarjetasProducto > 0) {
+                    console.log('[Producto][PostAgregar] tarjeta producto detectada por diagnóstico final; continuando');
+                    productoAgregado = true;
+                    marcarProductoConfirmado(registro);
+                    const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+                    productoProcesadoPorRegistro.add(keyAhora);
+                    console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                    break;
+                } else {
+                    throw new Error(`[CRITICO] Confirmación aceptada pero producto '${registro.tipoCuenta}' no visible en UI después de esperar 15s.`);
+                }
             }
         }
 
@@ -7705,7 +8171,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
                 : false;
             if (continuarVisible && continuarEnabled) {
                 try {
-await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro);
+                    await continuarResolviendoGestionDocumentalSiPide(page, { maxIntentos: 2 }, registro);
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     if (/\[CRITICO\].*Gestion documental/i.test(msg)) throw e;
@@ -8205,7 +8671,11 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         return 'continuar';
     };
 
-    const verificacionInicial = await procesarVerificacionesEspeciales(page).catch(() => null);
+    const verificacionInicial = await procesarVerificacionesEspeciales(page).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/\[CRITICO\]/i.test(msg)) throw e;
+        return null;
+    });
     if (verificacionInicial?.tipo === 'cumplimiento' && verificacionInicial.estado === 'post-producto') {
         await llenarPostProductoPostOfac();
     }
@@ -8267,7 +8737,11 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
     }
 
     for (let intentoAvance = 1; intentoAvance <= 3; intentoAvance++) {
-        const verificacionAntesAvance = await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionAntesAvance = await procesarVerificacionesEspeciales(page).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[CRITICO\]/i.test(msg)) throw e;
+            return null;
+        });
         if (verificacionAntesAvance?.tipo === 'cumplimiento' && verificacionAntesAvance.estado === 'post-producto') {
             await llenarPostProductoPostOfac();
             continue;
@@ -8324,7 +8798,11 @@ async function etapaRelacionadosYAsociacion(page: Page, registro: RegistroExcel)
         }
 
         console.log(`[Relacionados] completarInformacionClientePostProducto...`);
-        const verificacionAntesCompletarPostProducto = await procesarVerificacionesEspeciales(page).catch(() => null);
+        const verificacionAntesCompletarPostProducto = await procesarVerificacionesEspeciales(page).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/\[CRITICO\]/i.test(msg)) throw e;
+            return null;
+        });
         if (verificacionAntesCompletarPostProducto?.tipo === 'cumplimiento' && verificacionAntesCompletarPostProducto.estado === 'post-producto') {
             await llenarPostProductoPostOfac();
             continue;
@@ -8617,158 +9095,953 @@ test('Cuenta Efectivo Cliente Nuevo - desde Excel', async () => {
     }
 });
 
-async function completarOtrasCoincidenciasMixtasSiAplica(portalPage: Page): Promise<boolean> {
-    console.log('[MixtoOFACPLAFT] puente mixto verificando si aplica Otras Coincidencias');
+type ModoBizagi = 'OFAC' | 'LEXIS' | 'MIXTO';
 
-    await portalPage.waitForTimeout(1500);
+function cssEscapeDebug(value: string): string {
+    return (value || '').replace(/([ #;?%&,.+*~':"!^$[\]()=>|/@])/g, '\\$1');
+}
 
-    const paginas = portalPage.context().pages();
-    let bizagiPage: Page | null = null;
+async function esperarBizagiHomeOLoginListo(page: Page, timeoutMs = 60000): Promise<'home' | 'login-selector' | 'login-usuario-password'> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const body = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
+        const url = page.url();
+        const title = await page.title().catch(() => '');
 
-    for (let intento = 1; intento <= 3; intento++) {
-        for (const p of paginas) {
-            const url = p.url();
-            if (!url.includes('bizagi.com')) continue;
-            const tieneGestionar = await p.getByText(/Gestionar\s+Coincidencias/i).first().isVisible().catch(() => false);
-            const tieneOFAC = await p.getByText(/OFAC|Listas\s+OFAC/i).first().isVisible().catch(() => false);
-            if (tieneGestionar || tieneOFAC) {
-                bizagiPage = p;
+        const menuQuery = await page.locator('#menuQuery').first().isVisible({ timeout: 500 }).catch(() => false);
+        const bandeja = /Bandeja de entrada/i.test(body);
+        const nuevoCaso = /Nuevo Caso/i.test(body);
+        const consultas = /Consultas/i.test(body);
+        const reportes = /Reportes/i.test(body);
+        if (menuQuery || bandeja || nuevoCaso || consultas || reportes) {
+            console.log(`[Cumplimiento][Bizagi][Ready] home detectado menuQuery=${menuQuery} bandeja=${bandeja} nuevoCaso=${nuevoCaso} consultas=${consultas} reportes=${reportes}`);
+            return 'home';
+        }
+
+        const selectUsuario = await page.locator('select#user, select[name*="user" i], select[id*="user" i]').first().isVisible({ timeout: 500 }).catch(() => false);
+        const botonIngresar = await page.locator('button:has-text("Ingresar"), button:has-text("Login"), input[type="submit"], input#btnLogin, button#btnLogin').first().isVisible({ timeout: 500 }).catch(() => false);
+        if (selectUsuario && botonIngresar) {
+            console.log('[Cumplimiento][Bizagi][Ready] login selector detectado');
+            return 'login-selector';
+        }
+
+        const inputUsuario = await page.locator('input[name*="user" i], input[id*="user" i], input[placeholder*="usuario" i], input[placeholder*="user" i]').first().isVisible({ timeout: 500 }).catch(() => false);
+        const inputPassword = await page.locator('input[type="password"], input[name*="pass" i], input[id*="pass" i]').first().isVisible({ timeout: 500 }).catch(() => false);
+        if (inputUsuario && inputPassword && botonIngresar) {
+            console.log('[Cumplimiento][Bizagi][Ready] login usuario/password detectado');
+            return 'login-usuario-password';
+        }
+
+        console.log(`[Cumplimiento][Bizagi][Ready] esperando carga... url=${url} title='${title}' bodyLen=${body.length}`);
+        await page.waitForTimeout(1000);
+    }
+
+    const finalBody = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '');
+    throw new Error(`[Cumplimiento][Bizagi][Ready][CRITICO] Bizagi no llegó a home ni login en ${timeoutMs}ms. url=${page.url()} bodyPreview='${finalBody.slice(0, 500)}'`);
+}
+
+async function asegurarLoginBizagiPrincipal(page: Page): Promise<void> {
+    console.log('[Cumplimiento][Bizagi][Login] Verificando estado Bizagi');
+    const estado = await esperarBizagiHomeOLoginListo(page, 60000);
+    if (estado === 'home') {
+        console.log('[Cumplimiento][Bizagi][Login] Sesión Bizagi ya activa');
+        return;
+    }
+
+    const user = process.env.BIZAGI_USER || BIZAGI_USER;
+    const password = process.env.BIZAGI_PASSWORD || BIZAGI_PASSWORD || '';
+
+    const clickIngresar = async () => {
+        const btn = await pickVisible(page, [
+            page.getByRole('button', { name: /Ingresar|Login|Iniciar/i }).first(),
+            page.locator('input[type="submit"], button[type="submit"]').first(),
+            page.locator('input#btnLogin, button#btnLogin').first(),
+        ]);
+        if (!(await btn.isVisible().catch(() => false))) throw new Error('[Cumplimiento][Bizagi][Login][CRITICO] No se encontró botón Ingresar/Login');
+        await btn.click({ timeout: 10000, force: true }).catch(() => {});
+    };
+
+    if (estado === 'login-selector') {
+        console.log(`[Cumplimiento][Bizagi][Login] Login selector para usuario=${user}`);
+        const candidatos = page.locator('select:visible');
+        const totalSelects = await candidatos.count().catch(() => 0);
+        let select = page.locator('select#user, select[name*="user" i], select[id*="user" i]').first();
+        let selectedSelectIdx = -1;
+        for (let i = 0; i < totalSelects; i++) {
+            const s = candidatos.nth(i);
+            const opcionesS = await s.locator('option').evaluateAll((opts) =>
+                opts.map((o: any, idx) => ({ idx, value: o.value, text: o.textContent || '', selected: o.selected }))
+            ).catch(() => [] as any[]);
+            const contieneUsuario = (opcionesS as any[]).some((o) => /domain\\admon|admon|bmsc/i.test(`${o.value || ''} ${o.text || ''}`));
+            if (contieneUsuario) {
+                select = s;
+                selectedSelectIdx = i;
                 break;
             }
         }
-        if (bizagiPage) break;
-        console.log(`[MixtoOFACPLAFT] intento ${intento}/3 esperando pagina Bizagi...`);
-        await portalPage.waitForTimeout(1200);
+
+        const opciones = await select.locator('option').evaluateAll((opts) =>
+            opts.map((o: any, idx) => ({ idx, value: o.value, text: o.textContent || '', selected: o.selected }))
+        ).catch(() => []);
+        console.log(`[Cumplimiento][Bizagi][Login] opciones usuario=${JSON.stringify(opciones)}`);
+        if (selectedSelectIdx >= 0) {
+            console.log(`[Cumplimiento][Bizagi][Login] select usuario elegido idx=${selectedSelectIdx}`);
+        }
+
+        const userLower = user.toLowerCase();
+        const userCorto = userLower.split('\\').pop() || userLower;
+        const match = (opciones as any[]).find((o: any) =>
+            String(o.value || '').toLowerCase() === userLower ||
+            String(o.text || '').toLowerCase() === userLower ||
+            String(o.value || '').toLowerCase().endsWith(`\\${userCorto}`) ||
+            String(o.text || '').toLowerCase().endsWith(`\\${userCorto}`) ||
+            /admon/i.test(String(o.value || '')) ||
+            /admon/i.test(String(o.text || ''))
+        );
+        if (!match) throw new Error(`[Cumplimiento][Bizagi][Login][CRITICO] Usuario ${user} no encontrado en selector Bizagi`);
+
+        let seleccionadoOk = false;
+        let selectedFinal: any = null;
+        for (let intento = 1; intento <= 3; intento++) {
+            console.log(`[Cumplimiento][Bizagi][Login] seleccionando usuario intento=${intento} metodo=value`);
+            await select.selectOption({ value: String(match.value || '') }).catch(async () => {
+                console.log(`[Cumplimiento][Bizagi][Login] seleccionando usuario intento=${intento} metodo=label`);
+                await select.selectOption({ label: String(match.text || '') }).catch(async () => {
+                    console.log(`[Cumplimiento][Bizagi][Login] seleccionando usuario intento=${intento} metodo=index`);
+                    await select.selectOption({ index: Number(match.idx || 0) }).catch(() => {});
+                });
+            });
+
+            await select.evaluate((el) => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }).catch(() => {});
+
+            selectedFinal = await select.evaluate((el: HTMLSelectElement) => {
+                const opt = el.options[el.selectedIndex];
+                return {
+                    selectedIndex: el.selectedIndex,
+                    value: el.value,
+                    text: opt?.textContent?.trim() || '',
+                    selected: opt?.selected === true,
+                };
+            }).catch(() => ({ selectedIndex: -1, value: '', text: '', selected: false }));
+
+            console.log(`[Cumplimiento][Bizagi][Login] usuario seleccionado final=${JSON.stringify(selectedFinal)}`);
+            const finalTxt = `${selectedFinal?.value || ''} ${selectedFinal?.text || ''}`.toLowerCase();
+            seleccionadoOk = !!selectedFinal?.selected && (/domain\\admon|admon/.test(finalTxt));
+            if (seleccionadoOk) break;
+            await page.waitForTimeout(450);
+        }
+
+        if (!seleccionadoOk) {
+            throw new Error('[Cumplimiento][Bizagi][Login][CRITICO] No se pudo dejar seleccionado domain\\admon en login selector');
+        }
+
+        await page.waitForTimeout(800);
+        await clickIngresar();
+        console.log('[Cumplimiento][Bizagi][Login] Click Ingresar selector');
+        await page.waitForTimeout(1000);
+        const sigueLogin = await page.locator('select#user, select[name*="user" i], select[id*="user" i]').first().isVisible({ timeout: 1000 }).catch(() => false);
+        if (sigueLogin) {
+            await page.keyboard.press('Enter').catch(() => {});
+            await page.waitForTimeout(700);
+        }
+        console.log('[Cumplimiento][Bizagi][Login] Esperando home después de login selector');
+        const estadoPost = await esperarBizagiHomeOLoginListo(page, 90000);
+        if (estadoPost !== 'home') {
+            const selectedPost = await select.evaluate((el: HTMLSelectElement) => {
+                const opt = el.options[el.selectedIndex];
+                return {
+                    selectedIndex: el.selectedIndex,
+                    value: el.value,
+                    text: opt?.textContent?.trim() || '',
+                    selected: opt?.selected === true,
+                };
+            }).catch(() => ({ selectedIndex: -1, value: '', text: '', selected: false }));
+            const body = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '');
+            const ingresarVisible = await page.locator('button:has-text("Ingresar"), input[type="submit"], button[type="submit"]').first().isVisible().catch(() => false);
+            const errorVisible = await page.locator(':text-matches("error|inv[aá]lido|incorrecto|fall[oó]", "i")').first().isVisible().catch(() => false);
+            console.log(`[Cumplimiento][Bizagi][Login] selected post=${JSON.stringify(selectedPost)}`);
+            console.log(`[Cumplimiento][Bizagi][Login] ingresarVisible=${ingresarVisible} errorVisible=${errorVisible}`);
+            console.log(`[Cumplimiento][Bizagi][Login] bodyPreview='${body.replace(/\s+/g, ' ').trim().slice(0, 500)}'`);
+            throw new Error(`[Cumplimiento][Bizagi][Login][CRITICO] Después de login selector no llegó a home. estado=${estadoPost}`);
+        }
+        console.log('[Cumplimiento][Bizagi][Login] Login selector exitoso');
+        return;
     }
 
-    if (!bizagiPage) {
-        console.log('[MixtoOFACPLAFT] no hay pagina Bizagi activa con Gestionar Coincidencias');
-        return false;
+    if (estado === 'login-usuario-password') {
+        console.log(`[Cumplimiento][Bizagi][Login] Login usuario/password para usuario=${user}`);
+        const inputUser = page.locator('input[name*="user" i], input[id*="user" i], input[placeholder*="usuario" i], input[placeholder*="user" i]').first();
+        const inputPass = page.locator('input[type="password"], input[name*="pass" i], input[id*="pass" i]').first();
+        await inputUser.fill(user).catch(() => {});
+        await inputPass.fill(password).catch(() => {});
+        await clickIngresar();
+        console.log('[Cumplimiento][Bizagi][Login] Click Ingresar usuario/password');
+        const estadoPost = await esperarBizagiHomeOLoginListo(page, 60000);
+        if (estadoPost !== 'home') throw new Error(`[Cumplimiento][Bizagi][Login][CRITICO] Después de login usuario/password no llegó a home. estado=${estadoPost}`);
+        console.log('[Cumplimiento][Bizagi][Login] Login usuario/password exitoso');
     }
+}
 
-    await bizagiPage.bringToFront().catch(() => {});
-    await bizagiPage.waitForTimeout(800);
+async function abrirGestionCoincidenciasBizagiDesdePortalSinProcesar(portalPage: Page, mpnActual: string, modoBizagi: ModoBizagi): Promise<Page> {
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] INICIO modo=${modoBizagi} mpn=${mpnActual || 'N/A'}`);
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] BIZAGI_URL=${BIZAGI_URL}`);
+    const context = portalPage.context();
+    const bizagiPage = await abrirBizagiPrincipalDirecto(context);
+    await asegurarLoginBizagiPrincipal(bizagiPage);
+    console.log('[Cumplimiento][Bizagi][AbrirSinProcesar] login/verificación completa');
+    await buscarMpnEnBizagiPrincipal(bizagiPage, mpnActual);
+    const gestionPage = await abrirFilaGestionCoincidenciasPrincipal(bizagiPage, mpnActual);
+    await validarPantallaGestionCoincidenciasPrincipal(gestionPage);
+    if (!/bizagi/i.test(gestionPage.url())) {
+        throw new Error(`[Cumplimiento][Bizagi][AbrirSinProcesar][CRITICO] Apertura retornó página no Bizagi url=${gestionPage.url()}`);
+    }
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] RETURN bizagiPage url=${gestionPage.url()}`);
+    return gestionPage;
+}
 
-    const headerOtras = bizagiPage.getByText(/Otras\s+Coincidencias/i).first();
-    const headerVisible = await headerOtras.isVisible({ timeout: 3000 }).catch(() => false);
-    console.log(`[MixtoOFACPLAFT] header Otras Coincidencias visible=${headerVisible}`);
+async function abrirBizagiPrincipalDirecto(context: import('@playwright/test').BrowserContext): Promise<Page> {
+    for (const p of context.pages()) {
+        if (/bizagi/i.test(p.url())) {
+            await p.bringToFront().catch(() => {});
+            console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] bizagiPage reutilizada url=${p.url()}`);
+            return p;
+        }
+    }
+    console.log('[Cumplimiento][Bizagi][AbrirSinProcesar] No hay pestaña Bizagi reutilizable; creando nueva página');
+    const p = await context.newPage();
+    await p.goto(BIZAGI_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await p.waitForLoadState('domcontentloaded', { timeout: 60000 }).catch(() => {});
+    await p.waitForTimeout(1500);
+    const bodyInicial = await p.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    if (!bodyInicial.trim()) {
+        console.log('[Cumplimiento][Bizagi][AbrirSinProcesar][WARN] body vacío tras goto; esperando carga adicional');
+        await p.waitForTimeout(5000);
+        const bodySegundo = await p.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+        if (!bodySegundo.trim()) {
+            console.log('[Cumplimiento][Bizagi][AbrirSinProcesar][WARN] body sigue vacío; recargando una vez');
+            await p.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+            await p.waitForTimeout(5000);
+        }
+    }
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] bizagiPage creada url=${p.url()}`);
+    return p;
+}
 
-    if (!headerVisible) {
-        const tieneLexis = await bizagiPage.locator('div, tr, td, span').filter({ hasText: /Lexis\s+Nexis/i }).first().isVisible().catch(() => false);
-        if (!tieneLexis) {
-            console.log('[MixtoOFACPLAFT] no aplica caso mixto; no hay Otras Coincidencias/Lexis Nexis');
-            return false;
+async function buscarMpnEnBizagiPrincipal(bizagiPage: Page, mpnActual: string): Promise<void> {
+    const body = await bizagiPage.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    const title = await bizagiPage.title().catch(() => '');
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] postLogin url=${bizagiPage.url()}`);
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] postLogin title=${title}`);
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] postLogin bodyPreview='${body.slice(0, 500)}'`);
+
+    const buscador = bizagiPage.locator('#menuQuery').first();
+    const menuVisible = await buscador.isVisible({ timeout: 10000 }).catch(() => false);
+    if (!menuVisible) {
+        throw new Error(`[Cumplimiento][Bizagi][AbrirSinProcesar][CRITICO] Login completado pero #menuQuery no está visible. url=${bizagiPage.url()} bodyPreview='${body.slice(0, 500)}'`);
+    }
+    console.log('[Cumplimiento][Bizagi][AbrirSinProcesar] BuscadorSuperior visible #menuQuery');
+    console.log(`[Cumplimiento][Bizagi][Buscar] Buscando MPN=${mpnActual}`);
+    await buscador.fill('').catch(() => {});
+    await buscador.fill(mpnActual).catch(() => {});
+    await bizagiPage.keyboard.press('Enter').catch(() => {});
+    const iconoBuscar = bizagiPage.locator('#ui-bizagi-wp-app-inbox-search, .ui-bizagi-wp-app-inbox-search, i[class*="search"]').first();
+    if (await iconoBuscar.isVisible().catch(() => false)) {
+        console.log(`[Cumplimiento][Bizagi] Click en icono de busqueda para ${mpnActual}`);
+        await iconoBuscar.click({ force: true }).catch(() => {});
+    }
+    await bizagiPage.waitForTimeout(1500);
+    console.log('[Cumplimiento][Bizagi][AbrirSinProcesar] búsqueda MPN completada');
+}
+
+async function estaPantallaGestionCoincidenciasBizagi(page: Page): Promise<boolean> {
+    if (!/bizagi/i.test(page.url())) return false;
+
+    const checks = [
+        page.getByText(/Acci[oó]n\s+Coincidencias\s+OFAC/i).first(),
+        page.getByText(/Motivo\s+Coincidencias\s+OFAC/i).first(),
+        page.getByText(/Otras\s+Coincidencias/i).first(),
+        page.getByText(/Solicitar\s+Aclaraciones/i).first(),
+        page.getByRole('button', { name: /^Siguiente$/i }).first(),
+        page.getByText(/Enlaces\s+de\s+Inter[eé]s/i).first(),
+    ];
+
+    for (const locator of checks) {
+        try {
+            if (await locator.isVisible({ timeout: 1200 })) return true;
+        } catch {
+            // ignore
         }
     }
 
-    const filasLexisSelectors = [
-        'div.ui-bizagi-grid-row:has-text("Lexis Nexis")',
-        'tr:has-text("Lexis Nexis")',
-        '[role="row"]:has-text("Lexis Nexis")',
-        'div:has-text("Lexis Nexis")',
-    ];
+    const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    return /Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC|Otras\s+Coincidencias|Solicitar\s+Aclaraciones/i.test(body);
+}
 
-    let filasLexis = bizagiPage.locator(filasLexisSelectors[0]);
-    let totalFilas = 0;
-    for (const selector of filasLexisSelectors) {
-        const candidate = bizagiPage.locator(selector);
-        const count = await candidate.count().catch(() => 0);
-        if (count > 0) {
-            filasLexis = candidate;
-            totalFilas = count;
+async function esperarPantallaGestionCoincidenciasTrasClick(
+    page: Page,
+    contexto: string,
+    timeoutMs = 12000,
+): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    for (let intento = 1; Date.now() < deadline; intento++) {
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(700);
+
+        const body = await page.locator('body').innerText({ timeout: 2500 }).catch(() => '');
+        const bodyNorm = body.replace(/\s+/g, ' ').trim();
+
+        const bodyTieneGestion =
+            /Gestionar\s+Coincidencias/i.test(bodyNorm) &&
+            (
+                /Acci[oó]n\s+Coincidencias\s+OFAC/i.test(bodyNorm) ||
+                /Motivo\s+Coincidencias\s+OFAC/i.test(bodyNorm) ||
+                /Otras\s+Coincidencias/i.test(bodyNorm) ||
+                /Solicitar\s+Aclaraciones/i.test(bodyNorm)
+            );
+
+        const visibleHelper = await estaPantallaGestionCoincidenciasBizagi(page).catch(() => false);
+
+        console.log(`[Cumplimiento][Bizagi][AbrirFila][PostClick] contexto=${contexto} intento=${intento} bodyTieneGestion=${bodyTieneGestion} helper=${visibleHelper} url=${page.url()}`);
+        console.log(`[Cumplimiento][Bizagi][AbrirFila][Diag] post-click bodyTieneGestion=${bodyTieneGestion}`);
+
+        if (intento === 1 || bodyTieneGestion || visibleHelper) {
+            console.log(`[Cumplimiento][Bizagi][AbrirFila][Diag] bodyPreview='${bodyNorm.slice(0, 500)}'`);
+        }
+
+        if (bodyTieneGestion || visibleHelper) return true;
+    }
+
+    return false;
+}
+
+async function abrirFilaGestionCoincidenciasPrincipal(bizagiPage: Page, mpnActual: string): Promise<Page> {
+    if (await estaPantallaGestionCoincidenciasBizagi(bizagiPage)) {
+        console.log('[Cumplimiento][Bizagi][AbrirFila] pantalla ya abierta antes de click');
+        return bizagiPage;
+    }
+
+    const filas = bizagiPage.locator('tr:visible, .ui-bizagi-wp-app-inbox-cases-container li:visible, .ui-bizagi-wp-app-inbox-grid-row:visible').filter({ hasText: new RegExp(mpnActual, 'i') });
+    const filasCount = await filas.count().catch(() => 0);
+    console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] filas candidatas por MPN=${filasCount}`);
+
+    let filaSeleccionada: Locator | null = null;
+    for (let i = 0; i < filasCount; i++) {
+        const txt = ((await filas.nth(i).innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+        console.log(`[Cumplimiento][Bizagi][AbrirSinProcesar] fila[${i}]='${txt.slice(0, 220)}'`);
+        if (/Gestionar\s+Coincidencias/i.test(txt) && !/Verificar\s+PLAFT/i.test(txt)) {
+            filaSeleccionada = filas.nth(i);
+            console.log(`[Cumplimiento][Bizagi][AbrirFila] fila seleccionada texto='${txt.slice(0, 260)}'`);
             break;
         }
     }
+    if (!filaSeleccionada) throw new Error(`[Cumplimiento][Bizagi][AbrirSinProcesar][CRITICO] No existe fila Gestionar Coincidencias para ${mpnActual}`);
 
-    console.log(`[MixtoOFACPLAFT] filas Lexis Nexis detectadas=${totalFilas}`);
-
-    if (totalFilas === 0) {
-        console.log('[MixtoOFACPLAFT] no hay filas Lexis Nexis visibles');
-        return false;
-    }
-
-    let pendientes = 0;
-    for (let i = 0; i < Math.min(totalFilas, 5); i++) {
-        const fila = filasLexis.nth(i);
-        const visible = await fila.isVisible().catch(() => false);
-        if (!visible) continue;
-
-        const textoFila = await fila.innerText().catch(() => '');
-        if (!/Lexis\s*Nexis/i.test(textoFila)) continue;
-
-        const comboSelectors = [
-            'input.ui-select-data.ui-selectmenu-value[role="combobox"]',
-            'input[role="combobox"]',
-            'input.ui-selectmenu-value',
-            'input[aria-controls^="listbox-"]',
-        ];
-
-        let combo: Locator | null = null;
-        for (const sel of comboSelectors) {
-            const c = fila.locator(sel).first();
-            const v = await c.isVisible().catch(() => false);
-            if (v) {
-                combo = c;
-                break;
+    const postIntent = async (nombre: string): Promise<Page | null> => {
+        console.log(`[Cumplimiento][Bizagi][AbrirFila][Diag] intento=${nombre} ejecutando`);
+        const abiertoMisma = await esperarPantallaGestionCoincidenciasTrasClick(bizagiPage, nombre, 12000);
+        console.log(`[Cumplimiento][Bizagi][AbrirFila][Diag] intento=${nombre} abierto=${abiertoMisma}`);
+        if (abiertoMisma && await estaPantallaGestionCoincidenciasBizagi(bizagiPage)) {
+            if (/bizagi/i.test(bizagiPage.url())) {
+                console.log(`[Cumplimiento][Bizagi][AbrirFila] intento=${nombre} abierto=true url=${bizagiPage.url()}`);
+                return bizagiPage;
             }
         }
+        const pagesBizagi = bizagiPage.context().pages().filter((p) => /bizagi/i.test(p.url()));
+        for (const p of pagesBizagi) {
+            if (!/bizagi/i.test(p.url())) continue;
+            const abiertoOtra = await esperarPantallaGestionCoincidenciasTrasClick(p, `${nombre}-otraPage`, 5000);
+            if (abiertoOtra || await estaPantallaGestionCoincidenciasBizagi(p).catch(() => false)) {
+                console.log(`[Cumplimiento][Bizagi][AbrirFila] intento=${nombre} abierto=true url=${p.url()}`);
+                return p;
+            }
+        }
+        console.log(`[Cumplimiento][Bizagi][AbrirFila] intento=${nombre} abierto=false`);
+        return null;
+    };
 
-        if (!combo) {
-            console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo no encontrado`);
+    let abierta: Page | null = null;
+    const rad = filaSeleccionada.locator('a[href*="RadNumber"], a[id*="RadNumber"], td a').first();
+    if (await rad.isVisible().catch(() => false)) {
+        await rad.click({ force: true }).catch(() => {});
+        abierta = await postIntent('RadNumber');
+    }
+    if (!abierta) {
+        const act = filaSeleccionada.locator('.ui-bizagi-wp-app-inbox-activity-name:visible, a:has-text("Gestionar Coincidencias"):visible').first();
+        if (await act.isVisible().catch(() => false)) {
+            await act.click({ force: true }).catch(() => {});
+            abierta = await postIntent('activity-name');
+            if (!abierta) {
+                await act.dblclick().catch(() => {});
+                abierta = await postIntent('activity-name-dblclick');
+            }
+        }
+    }
+    if (!abierta) {
+        const txt = filaSeleccionada.getByText(/Gestionar\s+Coincidencias/i).first();
+        if (await txt.isVisible().catch(() => false)) {
+            await txt.click({ force: true }).catch(() => {});
+            abierta = await postIntent('text-Gestionar');
+        }
+    }
+    if (!abierta) {
+        const td = filaSeleccionada.locator('td:visible, .ui-bizagi-wp-app-inbox-grid-cell:visible').first();
+        if (await td.isVisible().catch(() => false)) {
+            await td.click({ force: true }).catch(() => {});
+            abierta = await postIntent('first-td');
+        }
+    }
+    if (!abierta) {
+        await filaSeleccionada.click({ force: true }).catch(() => {});
+        abierta = await postIntent('fila-click');
+    }
+    if (!abierta) {
+        await filaSeleccionada.dblclick().catch(() => {});
+        abierta = await postIntent('fila-dblclick');
+    }
+    if (!abierta) {
+        await filaSeleccionada.focus().catch(() => {});
+        await bizagiPage.keyboard.press('Enter').catch(() => {});
+        abierta = await postIntent('fila-enter');
+    }
+    if (!abierta) {
+        const b = await filaSeleccionada.boundingBox().catch(() => null);
+        if (b) {
+            await bizagiPage.mouse.click(b.x + b.width / 2, b.y + b.height / 2).catch(() => {});
+            abierta = await postIntent('coordenadas');
+            if (!abierta) {
+                await bizagiPage.mouse.dblclick(b.x + b.width / 2, b.y + b.height / 2).catch(() => {});
+                abierta = await postIntent('coordenadas-dblclick');
+            }
+        }
+    }
+    if (!abierta) throw new Error(`[Cumplimiento][Bizagi][CRITICO] No se pudo abrir/presentar Gestión de Coincidencias en Bizagi. mpn=${mpnActual}`);
+    if (!/bizagi/i.test(abierta.url())) throw new Error(`[Cumplimiento][Bizagi][CRITICO] Apertura retornó página no Bizagi url=${abierta.url()}`);
+    return abierta;
+}
+
+async function validarPantallaGestionCoincidenciasPrincipal(page: Page): Promise<void> {
+    const ok = await estaPantallaGestionCoincidenciasBizagi(page);
+    console.log(`[Cumplimiento][Bizagi][ValidarPantalla] gestionCoincidencias=${ok}`);
+    if (!ok) {
+        throw new Error(`[Cumplimiento][Bizagi][AbrirFila][CRITICO] No se detectó pantalla Gestionar Coincidencias tras abrir fila. url=${page.url()}`);
+    }
+}
+
+function normalizarTextoCombo(valor: string | null | undefined): string {
+    return (valor || '').replace(/\s+/g, ' ').trim();
+}
+
+function esAccionLexisFalsoPositivo(estado: string): boolean {
+    return /Falso\s+Positivo/i.test(estado || '');
+}
+
+function esAccionLexisPendiente(estado: string): boolean {
+    const t = normalizarTextoCombo(estado);
+    if (esAccionLexisFalsoPositivo(t)) return false;
+    return !t || /Por favor seleccione/i.test(t) || /^-+$/.test(t) || /Seleccione/i.test(t) || /opt-/i.test(t);
+}
+
+async function pickVisible(page: Page, cands: Locator[]): Promise<Locator> {
+    for (const c of cands) {
+        if (await c.isVisible().catch(() => false)) return c;
+    }
+    return page.locator('__nope__').first();
+}
+
+async function resolverModoBizagiDesdeListasPortal(page: Page): Promise<ModoBizagi> {
+    let valorListas = '';
+    const listasDt = page.locator('div[data-slot="dt"]').filter({ hasText: /^Listas$/i }).first();
+    if (await listasDt.isVisible().catch(() => false)) {
+        valorListas = await listasDt.locator('xpath=following-sibling::div[@data-slot="dd"][1]').innerText().catch(() => '');
+    }
+    if (!valorListas) {
+        valorListas = await page.locator('div[data-slot="dd"], .font-bold').filter({ hasText: /OFAC|Lexis\s+Nexis|PLAFT/i }).first().innerText().catch(() => '');
+    }
+    valorListas = normalizarTextoCombo(valorListas);
+    console.log(`[Cumplimiento][Bizagi] valor Listas='${valorListas}'`);
+
+    const tieneOfac = /OFAC/i.test(valorListas);
+    const tieneLexis = /Lexis\s+Nexis/i.test(valorListas);
+    let modo: ModoBizagi | null = null;
+    if (tieneOfac && tieneLexis) modo = 'MIXTO';
+    else if (tieneOfac) modo = 'OFAC';
+    else if (tieneLexis) modo = 'LEXIS';
+
+    if (!modo) throw new Error(`[Cumplimiento][Bizagi][CRITICO] No se pudo resolver modo Bizagi desde Listas. valor='${valorListas}'`);
+    console.log(`[Cumplimiento][Bizagi] modoBizagiDesdeListas=${modo}`);
+    return modo;
+}
+
+async function localizarPaginaBizagiActiva(portalPage: Page): Promise<Page> {
+    for (let intento = 1; intento <= 4; intento++) {
+        const paginas = portalPage.context().pages();
+        for (const p of paginas) {
+            if (!p.url().includes('bizagi.com')) continue;
+            const ok = await p.getByText(/Gestionar\s+Coincidencias|Coincidencias\s+OFAC|Otras\s+Coincidencias/i).first().isVisible().catch(() => false);
+            if (ok) return p;
+        }
+        await portalPage.waitForTimeout(1000);
+    }
+    throw new Error('[Cumplimiento][Bizagi][CRITICO] No se encontró página Bizagi activa para Gestionar Coincidencias');
+}
+
+async function seleccionarAccionOfacDescartarBizagi(page: Page): Promise<boolean> {
+    const radio = page.locator('input[type="radio"][id*="sidP_AccOFAC-2"], input[type="radio"][id*="AccOFAC"][value="2"], input[type="radio"][id*="OFAC"][value="2"]').first();
+    if ((await radio.count().catch(() => 0)) === 0) throw new Error('[OFAC][CRITICO] No se encontró radio Acción OFAC=Descartar');
+    await radio.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+    let checked = await radio.isChecked().catch(() => false);
+    if (!checked) {
+        await radio.evaluate((el) => {
+            const i = el as HTMLInputElement;
+            i.checked = true;
+            i.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            i.dispatchEvent(new Event('input', { bubbles: true }));
+            i.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(() => {});
+        await page.waitForTimeout(250);
+        checked = await radio.isChecked().catch(() => false);
+    }
+    console.log(`[OFAC] accionDescartar=${checked}`);
+    if (!checked) throw new Error('[OFAC][CRITICO] No se pudo seleccionar Acción Coincidencias OFAC=Descartar');
+    return true;
+}
+
+async function abrirComboMotivoOfacHumano(page: Page, combo: Locator): Promise<void> {
+    await combo.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(400);
+
+    const box = await combo.boundingBox().catch(() => null);
+    if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 }).catch(() => {});
+        await page.waitForTimeout(250);
+        await page.mouse.click(box.x + Math.max(6, box.width - 12), box.y + box.height / 2).catch(() => {});
+    } else {
+        await combo.click({ force: true }).catch(() => {});
+    }
+
+    await page.waitForTimeout(900);
+}
+
+function esTextoOpcionDropdownReal(texto: string): boolean {
+    const t = normalizarTextoCombo(texto);
+    if (!t) return false;
+    if (t.length > 250) return false;
+    if (/Regresar\s+Imprimir/i.test(t)) return false;
+    if (/Gesti[oó]n\s+Debida\s+Diligencia/i.test(t)) return false;
+    if (/Informaci[oó]n\s+del\s+Proceso/i.test(t)) return false;
+    if (/Coincidencias\s+OFAC\s+Lista\s+Detalle/i.test(t)) return false;
+    return true;
+}
+
+async function obtenerOpcionesMotivoOfacVisibles(page: Page, combo: Locator): Promise<Locator> {
+    const ariaControls = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
+    if (ariaControls) {
+        const root = page.locator(`#${cssEscapeDebug(ariaControls)}`);
+        const byAria = root
+            .locator('.ui-select-choices-row:visible, [role="option"]:visible, li:visible, .ui-select-choices-row-inner:visible')
+            .filter({ hasText: /\S/ });
+        if (await byAria.first().isVisible({ timeout: 1000 }).catch(() => false)) return byAria;
+    }
+
+    const dropdownRoots = page.locator('.ui-select-dropdown:visible, .ui-select-choices:visible, [role="listbox"]:visible');
+    const totalRoots = await dropdownRoots.count().catch(() => 0);
+    for (let i = 0; i < totalRoots; i++) {
+        const root = dropdownRoots.nth(i);
+        const opts = root.locator('.ui-select-choices-row:visible, [role="option"]:visible, li:visible, .ui-select-choices-row-inner:visible').filter({ hasText: /\S/ });
+        const c = await opts.count().catch(() => 0);
+        if (c > 0) return opts;
+    }
+
+    const fallback = page.locator('.ui-select-choices-row:visible, [role="option"]:visible, .ui-selectmenu-menu:visible li:visible');
+    return fallback;
+}
+
+function esTextoPlaceholderMotivoOfac(texto: string): boolean {
+    const t = normalizarTextoCombo(texto);
+    return !t || /^[-\s]+$/.test(t) || /Por favor seleccione/i.test(t);
+}
+
+function esTextoMotivoOfacValido(texto: string): boolean {
+    const t = normalizarTextoCombo(texto);
+    if (esTextoPlaceholderMotivoOfac(t)) return false;
+    return /Coincidencia\s+descartada|no\s+corresponderse|Listas\s+de\s+Control/i.test(t);
+}
+
+async function esperarMotivosOfacDisponibles(page: Page, combo: Locator): Promise<boolean> {
+    const deadline = Date.now() + 25000;
+    for (let intento = 1; Date.now() < deadline; intento++) {
+        console.log(`[OFAC][MotivoWait] intento=${intento} esperando opciones motivo...`);
+
+        await abrirComboMotivoOfacHumano(page, combo);
+        const opciones = await obtenerOpcionesMotivoOfacVisibles(page, combo);
+        const count = await opciones.count().catch(() => 0);
+        const textos: string[] = [];
+        let descartadas = 0;
+        for (let i = 0; i < Math.min(count, 10); i++) {
+            const txt = normalizarTextoCombo(await opciones.nth(i).innerText().catch(() => ''));
+            if (!txt) continue;
+            if (!esTextoOpcionDropdownReal(txt)) {
+                descartadas++;
+                console.log(`[OFAC][Motivo][WARN] descartando falsa opción len=${txt.length} preview='${txt.slice(0, 120)}'`);
+                continue;
+            }
+            textos.push(txt);
+        }
+
+        const validas = textos.filter(esTextoMotivoOfacValido);
+        console.log(`[OFAC][MotivoWait] intento=${intento} opciones=${textos.length} validas=${validas.length} descartadas=${descartadas} textos=${JSON.stringify(textos.slice(0, 5))}`);
+
+        if (validas.length > 0) return true;
+
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(1200);
+    }
+    return false;
+}
+
+async function seleccionarMotivoOfacBizagi(page: Page): Promise<boolean> {
+    console.log('[OFAC] Buscando Motivo Coincidencias OFAC');
+    const labelMotivo = page.getByText(/Motivo\s+Coincidencias\s+OFAC/i).first();
+    if (!(await labelMotivo.isVisible().catch(() => false))) throw new Error('[OFAC][CRITICO] No se encontró label Motivo Coincidencias OFAC');
+    let combo = labelMotivo.locator('xpath=following::input[@role="combobox" or contains(@class,"ui-selectmenu-value")][1]').first();
+    let comboVisible = await combo.isVisible().catch(() => false);
+    if (!comboVisible) {
+        const contenedor = labelMotivo.locator('xpath=ancestor::*[self::div or self::tr or self::td or self::section][1]').first();
+        combo = contenedor.locator('input[role="combobox"]:visible, input.ui-select-data.ui-selectmenu-value:visible, .ui-selectmenu input:visible').first();
+        comboVisible = await combo.isVisible().catch(() => false);
+    }
+    console.log(`[OFAC] comboMotivo localizado=${comboVisible}`);
+    if (!comboVisible) throw new Error('[OFAC][CRITICO] No se encontró combo Motivo Coincidencias OFAC');
+
+    await page.waitForTimeout(400);
+    const comboDisabled = await combo.isDisabled().catch(() => false);
+    const comboBox = await combo.boundingBox().catch(() => null);
+    const comboId = (await combo.getAttribute('id').catch(() => '')) || '';
+    const listboxId = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
+    const comboInicial = normalizarTextoCombo(
+        (await combo.inputValue().catch(() => '')) ||
+        (await combo.getAttribute('value').catch(() => '')) ||
+        (await combo.getAttribute('title').catch(() => '')) || ''
+    );
+    console.log(`[OFAC] comboMotivo id='${comboId}' ariaControls='${listboxId}' disabled=${comboDisabled} inicial='${comboInicial}'`);
+
+    const motivosListos = await esperarMotivosOfacDisponibles(page, combo);
+    if (!motivosListos) {
+        const opcionesDiag = await obtenerOpcionesMotivoOfacVisibles(page, combo);
+        const countDiag = await opcionesDiag.count().catch(() => 0);
+        console.log(`[OFAC] opcionesMotivo visibles=${countDiag}`);
+        for (let i = 0; i < Math.min(countDiag, 10); i++) {
+            const txt = normalizarTextoCombo(await opcionesDiag.nth(i).innerText().catch(() => ''));
+            if (txt) console.log(`[OFAC] opcionMotivo[${i}]='${txt}'`);
+        }
+        const bodyText = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '');
+        const objetivoEnBody = /Coincidencia\s+descartada\s+por\s+no\s+corresponderse.*persona\s+incluida.*Listas\s+de\s+Control/i.test(bodyText);
+        console.log(`[OFAC] body contiene texto objetivo=${objetivoEnBody}`);
+        throw new Error('[OFAC][CRITICO] No se encontró opción válida de Motivo OFAC');
+    }
+
+    await abrirComboMotivoOfacHumano(page, combo);
+    let opciones = await obtenerOpcionesMotivoOfacVisibles(page, combo);
+    const opcionesCountRaw = await opciones.count().catch(() => 0);
+    const opcionesReales: Array<{ idx: number; txt: string }> = [];
+    let descartadas = 0;
+    for (let i = 0; i < Math.min(opcionesCountRaw, 20); i++) {
+        const txt = normalizarTextoCombo(await opciones.nth(i).innerText().catch(() => ''));
+        if (!txt) continue;
+        if (!esTextoOpcionDropdownReal(txt)) {
+            descartadas++;
+            console.log(`[OFAC][Motivo][WARN] descartando falsa opción len=${txt.length} preview='${txt.slice(0, 120)}'`);
             continue;
         }
-
-        const valorActual = await combo.inputValue().catch(() => '');
-        console.log(`[MixtoOFACPLAFT] fila ${i + 1} accionActual='${valorActual}'`);
-
-        if (/Falso\s+Positivo/i.test(valorActual)) {
-            console.log(`[MixtoOFACPLAFT] fila ${i + 1} ya tiene Falso Positivo; omitiendo`);
-            continue;
-        }
-
-        if (/Por favor seleccione/i.test(valorActual) || !valorActual.trim()) {
-            pendientes++;
-            console.log(`[MixtoOFACPLAFT] fila ${i + 1} combo encontrado por input.ui-select-data.ui-selectmenu-value`);
-
-            await combo.scrollIntoViewIfNeeded().catch(() => {});
-            await combo.click({ force: true }).catch(() => {});
-
-            const ariaControls = await combo.getAttribute('aria-controls').catch(() => null);
-            let listboxVisible = false;
-
-            if (ariaControls) {
-                const listbox = bizagiPage.locator(`#${ariaControls}, [id="${ariaControls}"]`).first();
-                listboxVisible = await listbox.isVisible({ timeout: 1500 }).catch(() => false);
-            }
-
-            if (!listboxVisible) {
-                const fallbackListbox = bizagiPage.locator('[role="listbox"]:visible, .ui-selectmenu-menu:visible, .ui-menu:visible').first();
-                listboxVisible = await fallbackListbox.isVisible({ timeout: 1500 }).catch(() => false);
-            }
-
-            console.log(`[MixtoOFACPLAFT] fila ${i + 1} panel abierto=${listboxVisible}`);
-
-            const opcion = bizagiPage.locator('[role="option"], li, .ui-menu-item, .ui-selectmenu-item').filter({ hasText: /Falso\s+Positivo/i }).first();
-            const opcionVisible = await opcion.isVisible({ timeout: 2000 }).catch(() => false);
-
-            if (opcionVisible) {
-                await opcion.click({ force: true }).catch(() => {});
-                await bizagiPage.waitForTimeout(400);
-
-                const nuevoValor = await combo.inputValue().catch(() => '');
-                console.log(`[MixtoOFACPLAFT] fila ${i + 1} accion seleccionada='${nuevoValor}'`);
-            } else {
-                console.log(`[MixtoOFACPLAFT] fila ${i + 1} opcion Falso Positivo no encontrada`);
-            }
-        }
+        opcionesReales.push({ idx: i, txt });
+    }
+    console.log(`[OFAC] opcionesMotivo visibles=${opcionesReales.length}`);
+    for (let i = 0; i < Math.min(10, opcionesReales.length); i++) {
+        console.log(`[OFAC] opcionMotivo[${i}]='${opcionesReales[i].txt}'`);
     }
 
-    console.log(`[MixtoOFACPLAFT] pendientesSinAccion=${pendientes}`);
-
-    if (pendientes > 0) {
-        throw new Error(`[MixtoOFACPLAFT][CRITICO] Quedan filas Lexis Nexis sin Acción. pendientes=${pendientes}`);
+    let opcion = opciones.filter({ hasText: /Coincidencia\s+descartada\s+por\s+no\s+corresponderse.*persona\s+incluida.*Listas\s+de\s+Control/i }).first();
+    if (!(await opcion.isVisible().catch(() => false)) || !esTextoOpcionDropdownReal(normalizarTextoCombo(await opcion.innerText().catch(() => '')))) {
+        opcion = opciones.filter({ hasText: /Coincidencia\s+descartada|no\s+corresponderse|Listas\s+de\s+Control/i }).first();
+    }
+    const opcionTexto = normalizarTextoCombo(await opcion.innerText().catch(() => ''));
+    if (!(await opcion.isVisible().catch(() => false)) || !esTextoOpcionDropdownReal(opcionTexto) || esTextoPlaceholderMotivoOfac(opcionTexto)) {
+        console.log(`[OFAC] diagnostico combo id='${comboId}' ariaControls='${listboxId}' opcionesReales=${opcionesReales.length} descartadas=${descartadas} textos=${JSON.stringify(opcionesReales.slice(0, 10).map(o => o.txt))}`);
+        throw new Error('[OFAC][CRITICO] No se encontró opción válida de Motivo OFAC');
     }
 
-    console.log('[MixtoOFACPLAFT] todas las Otras Coincidencias fueron completadas');
+    const opcionTxt = normalizarTextoCombo(await opcion.innerText().catch(() => ''));
+    console.log(`[OFAC] seleccionando motivo='${opcionTxt}'`);
+    await opcion.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    const final = normalizarTextoCombo((await combo.inputValue().catch(() => '')) || (await combo.getAttribute('value').catch(() => '')) || (await combo.getAttribute('title').catch(() => '')) || (await combo.innerText().catch(() => '')) || '');
+    const ok = /Coincidencia\s+descartada|no\s+corresponderse|Listas\s+de\s+Control/i.test(final);
+    console.log(`[OFAC] motivoFinal='${final}'`);
+    console.log(`[OFAC] motivoSeleccionado=${ok}`);
+    if (!ok) throw new Error('[OFAC][CRITICO] No se seleccionó Motivo Coincidencias OFAC');
+    return true;
+}
+
+async function aprobarOfacGestionCoincidenciasBizagi(page: Page): Promise<boolean> {
+    const body = await page.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    const hayOfac = /Coincidencias\s+OFAC|Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC/i.test(body);
+    if (!hayOfac) return false;
+    const accionDescartar = await seleccionarAccionOfacDescartarBizagi(page);
+    await page.waitForTimeout(1800);
+    const motivoSeleccionado = await seleccionarMotivoOfacBizagi(page);
+    if (!accionDescartar || !motivoSeleccionado) throw new Error('[OFAC][CRITICO] OFAC no quedó completado');
+    console.log('[OFAC] OFAC completado');
+    return true;
+}
+
+type ComboLexisMeta = {
+    id: string;
+    ariaControls: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    centerX: number;
+    centerY: number;
+    estado: string;
+    domIndexGlobal: number;
+    ordinalEntreMismoId: number;
+};
+
+async function obtenerCombosAccionLexisMetaBizagi(page: Page): Promise<{ combos: ComboLexisMeta[]; textosLexis: number }> {
+    return await page.evaluate(() => {
+        const norm = (s?: string | null) => (s || '').replace(/\s+/g, ' ').trim();
+        const header = Array.from(document.querySelectorAll('.bz-rn-grid-header-title')).find((h) => /^Otras Coincidencias$/i.test(norm((h as HTMLElement).innerText))) as HTMLElement | undefined;
+        const seccion = header?.closest('.ui-bizagi-grid') || header?.closest('.ui-bizagi-render') || header?.closest('.bzg-form-grid') || document.body;
+        const all = Array.from(seccion.querySelectorAll('label, span, div')) as HTMLElement[];
+        const textosLexis = all.filter((el) => /^Lexis Nexis$/i.test(norm(el.innerText))).length;
+        const lexisRefs = all.filter((el) => /^Lexis Nexis$/i.test(norm(el.innerText))).map((el) => {
+            const r = el.getBoundingClientRect();
+            return { x: r.left, y: r.top + r.height / 2 };
+        });
+        const raw = Array.from(seccion.querySelectorAll('input[role="combobox"], input.ui-select-data.ui-selectmenu-value, .ui-selectmenu input')) as HTMLInputElement[];
+        const idCount = new Map<string, number>();
+        const combos = raw.map((input, idx) => {
+            const rect = input.getBoundingClientRect();
+            const visible = rect.width > 0 && rect.height > 0;
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const row = input.closest('tr, .ui-bizagi-grid-row, [role="row"], .ui-bizagi-grid-cell, .ui-bizagi-render-control') as HTMLElement | null;
+            const textAround = norm(row?.innerText || input.closest('div')?.innerText || '');
+            const esLexis = /Lexis Nexis/i.test(textAround) || lexisRefs.some((r) => Math.abs(cy - r.y) <= 25 && cx > r.x);
+            const estado = norm([input.value || input.getAttribute('value') || '', input.getAttribute('title') || '', input.getAttribute('aria-controls') || ''].filter(Boolean).join(' | '));
+            const esMotivoOfac = /Motivo\s+Coincidencias\s+OFAC/i.test(textAround) || /Coincidencia descartada por no corresponderse/i.test(estado);
+            const id = input.id || '';
+            const curr = idCount.get(id) || 0;
+            idCount.set(id, curr + 1);
+            return {
+                id,
+                ariaControls: input.getAttribute('aria-controls') || '',
+                x: rect.left,
+                y: rect.top,
+                width: rect.width,
+                height: rect.height,
+                centerX: cx,
+                centerY: cy,
+                estado,
+                domIndexGlobal: idx,
+                ordinalEntreMismoId: curr,
+                visible,
+                esLexis,
+                esMotivoOfac,
+            };
+        }).filter((c: any) => c.visible && c.esLexis && !c.esMotivoOfac);
+        return { combos, textosLexis };
+    });
+}
+
+async function localizarComboPorCandidatoBizagi(page: Page, c: ComboLexisMeta): Promise<Locator> {
+    const inputs = page.locator('input[role="combobox"]:visible, input.ui-select-data.ui-selectmenu-value:visible, .ui-selectmenu input:visible');
+    const count = await inputs.count().catch(() => 0);
+    let best = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < count; i++) {
+        const it = inputs.nth(i);
+        const b = await it.boundingBox().catch(() => null);
+        if (!b) continue;
+        const cx = b.x + b.width / 2;
+        const cy = b.y + b.height / 2;
+        const score = Math.abs(cx - c.centerX) * 5 + Math.abs(cy - c.centerY) * 20 + Math.abs(b.width - c.width) + Math.abs(b.height - c.height);
+        if (score < bestScore) {
+            bestScore = score;
+            best = i;
+        }
+    }
+    return inputs.nth(best);
+}
+
+async function seleccionarFalsoPositivoEnComboLexisBizagi(page: Page, combo: Locator, comboIndex: number, estadoInicial: string): Promise<boolean> {
+    const label = `[Lexis] combo ${comboIndex + 1}`;
+    const esFp = esAccionLexisFalsoPositivo(estadoInicial);
+    const pendiente = esAccionLexisPendiente(estadoInicial);
+    console.log(`${label} estadoInicial='${estadoInicial}'`);
+    console.log(`${label} esFalsoPositivo=${esFp} esPendiente=${pendiente}`);
+    console.log(`${label} pendiente=${pendiente}; seleccionando Falso Positivo`);
+    if (!pendiente) return true;
+    await combo.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+    const ariaControls = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
+    let opciones = ariaControls
+        ? page.locator(`#${cssEscapeDebug(ariaControls)} li:visible, #${cssEscapeDebug(ariaControls)} [role="option"]:visible`)
+        : page.locator('li[role="option"]:visible, [role="option"]:visible, .ui-selectmenu-menu:visible li:visible');
+    if ((await opciones.count().catch(() => 0)) === 0) opciones = page.locator('li[role="option"]:visible, [role="option"]:visible, .ui-selectmenu-menu:visible li:visible');
+    let op = opciones.filter({ hasText: /^\s*Falso\s*Positivo\s*$/i }).first();
+    if (!(await op.isVisible().catch(() => false))) op = opciones.filter({ hasText: /Falso\s*Positivo/i }).first();
+    if (await op.isVisible().catch(() => false)) {
+        await op.click({ force: true }).catch(() => {});
+    } else {
+        await combo.focus().catch(() => {});
+        await page.keyboard.press('ArrowDown').catch(() => {});
+        await page.waitForTimeout(180);
+        await page.keyboard.press('Enter').catch(() => {});
+    }
+    await page.waitForTimeout(400);
+    const final = normalizarTextoCombo((await combo.inputValue().catch(() => '')) || (await combo.getAttribute('value').catch(() => '')) || '');
+    console.log(`${label} estadoFinal='${final}'`);
+    return esAccionLexisFalsoPositivo(final);
+}
+
+async function completarLexisNexisOtrasCoincidenciasBizagi(page: Page): Promise<boolean> {
+    const inicial = await obtenerCombosAccionLexisMetaBizagi(page);
+    const combos = inicial.combos;
+    console.log(`[Lexis] combosAccionLexis detectados=${combos.length}`);
+    combos.forEach((c, i) => {
+        console.log(`[Lexis] combo[${i}] id='${c.id}' estado='${c.estado}'`);
+    });
+    if (inicial.textosLexis > combos.length) {
+        console.log(`[Lexis][WARN] textosLexis=${inicial.textosLexis} pero combosAccionLexis=${combos.length}`);
+    }
+    if (combos.length === 0) return false;
+
+    const pendientesInicial = combos.filter((c) => esAccionLexisPendiente(c.estado)).length;
+    let actualizados = 0;
+
+    for (let i = 0; i < combos.length; i++) {
+        const c = combos[i];
+        const combo = await localizarComboPorCandidatoBizagi(page, c);
+        const idReal = (await combo.getAttribute('id').catch(() => '')) || '';
+        const ariaReal = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
+        console.log(`[Lexis] procesando combo id='${c.id}'`);
+        console.log(`[Lexis] combo ${i + 1} candidatoId='${c.id}' idReal='${idReal}' ariaReal='${ariaReal}'`);
+        const estadoInicial = normalizarTextoCombo([
+            (await combo.inputValue().catch(() => '')) || '',
+            (await combo.getAttribute('value').catch(() => '')) || '',
+            (await combo.getAttribute('title').catch(() => '')) || '',
+            ariaReal,
+        ].filter(Boolean).join(' | ')) || c.estado;
+        const pendiente = esAccionLexisPendiente(estadoInicial);
+        const ok = await seleccionarFalsoPositivoEnComboLexisBizagi(page, combo, i, estadoInicial);
+        if (ok && pendiente) actualizados++;
+    }
+
+    let pendientesFinal = 0;
+    for (const c of combos) {
+        const combo = await localizarComboPorCandidatoBizagi(page, c);
+        const estado = normalizarTextoCombo([
+            (await combo.inputValue().catch(() => '')) || '',
+            (await combo.getAttribute('value').catch(() => '')) || '',
+            (await combo.getAttribute('title').catch(() => '')) || '',
+            (await combo.getAttribute('aria-controls').catch(() => '')) || '',
+        ].filter(Boolean).join(' | '));
+        if (esAccionLexisPendiente(estado)) pendientesFinal++;
+    }
+    console.log(`[Lexis] combosPendientesInicial=${pendientesInicial}`);
+    console.log(`[Lexis] combosActualizados=${actualizados}`);
+    console.log(`[Lexis] combosPendientesFinal=${pendientesFinal}`);
+    if (pendientesFinal > 0) throw new Error('[Lexis][CRITICO] Quedan combos Lexis Nexis pendientes');
+    return true;
+}
+
+async function seleccionarSolicitarAclaracionesNoBizagi(page: Page): Promise<boolean> {
+    const label = page.getByText(/Solicitar\s+Aclaraciones\??/i).first();
+    if (!(await label.isVisible().catch(() => false))) throw new Error('[Aclaraciones][CRITICO] No se encontró campo Solicitar Aclaraciones');
+    const no = page.getByText(/^No$/i).first();
+    if (await no.isVisible().catch(() => false)) await no.click({ force: true }).catch(() => {});
+    else {
+        const radioNo = page.locator('input[type="radio"][value="false"], input[type="radio"][value="No"], input[type="radio"][value="0"]').first();
+        await radioNo.click({ force: true }).catch(() => {});
+    }
+    await page.waitForTimeout(300);
+    const ok = await page.evaluate(() => {
+        const radios = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+        return radios.some((r) => r.checked && (/false|no|0/i.test(String(r.value || ''))));
+    }).catch(() => false);
+    console.log(`[Aclaraciones] validacionFinalNo=${ok}`);
+    if (!ok) throw new Error('[Aclaraciones][CRITICO] No se pudo seleccionar Solicitar Aclaraciones=No');
+    return true;
+}
+
+async function clickSiguienteGestionCoincidenciasBizagi(page: Page): Promise<void> {
+    const btn = await pickVisible(page, [
+        page.locator('input#formButton1[value="Siguiente"]:visible').first(),
+        page.locator('input[type="button"][value="Siguiente"]:visible').first(),
+        page.locator('button:has-text("Siguiente"):visible').first(),
+        page.getByRole('button', { name: /Siguiente/i }).first(),
+    ]);
+    if (!(await btn.isVisible().catch(() => false))) throw new Error('[Siguiente][CRITICO] No se encontró botón Siguiente');
+    console.log('[Siguiente] Click Siguiente');
+    await btn.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(900);
+}
+
+async function aceptarModalConfirmacionBizagi(page: Page): Promise<boolean> {
+    const modal = page
+        .locator('[role="dialog"]:visible, .modal:visible, .ui-dialog:visible, div:has-text("Bizagi"), div:has-text("¿Está seguro de continuar")')
+        .filter({ hasText: /Bizagi|Está seguro de continuar|no es posible deshacer/i })
+        .first();
+    const modalVisible = await modal.isVisible({ timeout: 8000 }).catch(() => false);
+    console.log(`[Confirmacion] modalVisible=${modalVisible}`);
+    if (!modalVisible) throw new Error('[Confirmacion][CRITICO] No apareció modal Bizagi después de Siguiente');
+    const aceptar = await pickVisible(page, [
+        modal.getByRole('button', { name: /Aceptar/i }).first(),
+        modal.locator('button:has-text("Aceptar")').first(),
+        modal.locator('input[type="button"][value="Aceptar"]').first(),
+    ]);
+    if (!(await aceptar.isVisible().catch(() => false))) throw new Error('[Confirmacion][CRITICO] Modal visible pero no se encontró Aceptar');
+    console.log('[Confirmacion] Click Aceptar');
+    await aceptar.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(600);
+    const modalCerrado = !(await modal.isVisible().catch(() => false));
+    console.log(`[Confirmacion] modalCerrado=${modalCerrado}`);
+    if (!modalCerrado) throw new Error('[Confirmacion][CRITICO] No cerró modal Bizagi');
+    return true;
+}
+
+async function completarGestionCoincidenciasBizagiPorModo(bizagiPage: Page, modo: ModoBizagi): Promise<boolean> {
+    const url = bizagiPage.url();
+    if (!/bizagi/i.test(url)) {
+        throw new Error(`[Cumplimiento][Bizagi][CRITICO] completarGestionCoincidenciasBizagiPorModo recibió una página que no parece Bizagi. url=${url}`);
+    }
+    await bizagiPage.bringToFront().catch(() => {});
+    console.log(`[Cumplimiento][Bizagi] completarGestionCoincidenciasBizagiPorModo inicio modo=${modo} url=${bizagiPage.url()}`);
+
+    let ofacOk = true;
+    let lexisOk = true;
+    const body = await bizagiPage.locator('body').innerText({ timeout: 3000 }).catch(() => '');
+    const hayOfac = /Coincidencias\s+OFAC|Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC/i.test(body);
+    const hayLexis = /Lexis\s+Nexis|Otras\s+Coincidencias/i.test(body);
+
+    if (modo === 'OFAC' || modo === 'MIXTO') ofacOk = await aprobarOfacGestionCoincidenciasBizagi(bizagiPage);
+    if (modo === 'LEXIS' || modo === 'MIXTO') lexisOk = await completarLexisNexisOtrasCoincidenciasBizagi(bizagiPage);
+
+    console.log(`[Cumplimiento][Bizagi] validacionFinal hayOfac=${hayOfac} resultOfac=${ofacOk} hayLexis=${hayLexis} resultLexis=${lexisOk}`);
+    if (hayOfac && !ofacOk) throw new Error('[Cumplimiento][Bizagi][CRITICO] OFAC detectado pero no fue completado');
+    if (hayLexis && !lexisOk) throw new Error('[Cumplimiento][Bizagi][CRITICO] MIXTO no puede completar con LEXIS=false');
+
+    await seleccionarSolicitarAclaracionesNoBizagi(bizagiPage);
+    await clickSiguienteGestionCoincidenciasBizagi(bizagiPage);
+    await aceptarModalConfirmacionBizagi(bizagiPage);
     return true;
 }

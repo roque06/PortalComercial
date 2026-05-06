@@ -52,10 +52,8 @@ export default defineConfig({
       name: 'edge-con-perfil-real',
       use: {
         viewport: null,
-        // Ruta típica de Edge en Windows
-        executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        // Perfil de Edge (ajustar si es otro perfil)
-        userDataDir: 'C:\\Users\\radames\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default',
+        channel: 'msedge',
+        browserName: 'chromium',
         headless: false,
         args: [
           '--start-maximized',

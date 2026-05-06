@@ -114,6 +114,72 @@ async function encontrarDropdownInstrumentoRobusto(page: import("@playwright/tes
   return null;
 }
 
+async function seleccionarOpcionDropdownPrimeNG(
+  page: import("@playwright/test").Page,
+  dropdown: import("@playwright/test").Locator,
+  opcionTexto: string,
+  logPrefix: string
+): Promise<void> {
+  for (let intento = 1; intento <= 5; intento++) {
+    console.log(`${logPrefix} Seleccionando opción '${opcionTexto}' intento=${intento}/5`);
+
+    await dropdown.scrollIntoViewIfNeeded().catch(() => {});
+
+    const panelAntes = page.locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible').last();
+
+    if (!(await panelAntes.isVisible().catch(() => false))) {
+      const trigger = dropdown.locator('.p-dropdown-trigger, [data-pc-section="trigger"]').first();
+
+      if (await trigger.isVisible().catch(() => false)) {
+        await trigger.click({ force: true });
+      } else {
+        await dropdown.click({ force: true });
+      }
+    }
+
+    await page.waitForTimeout(250);
+
+    const panel = page
+      .locator('.p-dropdown-panel:visible, .p-select-overlay:visible, [role="listbox"]:visible')
+      .last();
+
+    await panel.waitFor({ state: 'visible', timeout: 5000 });
+
+    const opciones = panel.locator('li[role="option"], .p-dropdown-item, [data-pc-section="item"]');
+    await opciones.first().waitFor({ state: 'visible', timeout: 5000 });
+
+    const total = await opciones.count().catch(() => 0);
+    console.log(`${logPrefix} opciones visibles=${total}`);
+
+    for (let i = 0; i < total; i++) {
+      const op = opciones.nth(i);
+      const txt = ((await op.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+      const aria = ((await op.getAttribute('aria-label').catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+
+      console.log(`${logPrefix} opcion[${i}] text='${txt}' aria='${aria}'`);
+
+      if (new RegExp(`^${opcionTexto}$`, 'i').test(txt) || new RegExp(`^${opcionTexto}$`, 'i').test(aria)) {
+        try {
+          await op.scrollIntoViewIfNeeded().catch(() => {});
+          await op.click({ force: true, timeout: 3000 });
+          await page.waitForTimeout(500);
+          return;
+        } catch (e) {
+          console.log(`${logPrefix} WARN opción detached/stale al hacer click. Reintentando. Error=${String(e)}`);
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(300);
+          break;
+        }
+      }
+    }
+
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(400);
+  }
+
+  throw new Error(`${logPrefix} No se pudo seleccionar la opción '${opcionTexto}'`);
+}
+
 export async function seleccionarInstrumentoRobusto(page: import("@playwright/test").Page) {
   // Función que replica la lógica de leerEstadoDropdown para validación final
   const leerEstadoInstrumento = async () => {
@@ -269,24 +335,35 @@ export async function seleccionarInstrumentoRobusto(page: import("@playwright/te
       return;
     }
 
-    // Intentar con la función existente primero
+    // Usar el helper robusto para seleccionar "Efectivo" por texto
     try {
-      await seleccionarDropdownFiltrableConReintentar(
-        page,
-        "Instrumento",
-        { index: 1 },
-        { maxIntentos: 3, esperaMs: 800, timeoutCampoMs: 8000, timeoutPanelMs: 6000, usarFiltro: false }
-      );
-    } catch (_) {
-      // Si falla, usar estrategia directa
-      console.log(`[Instrumento] Intento ${i}/5: seleccionarDropdownFiltrableConReintentar fallo. Usando estrategia directa...`);
-      await seleccionarPrimerItem(dd).catch(() => {});
+      console.log(`[Instrumento] Intento ${i}/5: seleccionando 'Efectivo' con helper robusto...`);
+      await seleccionarOpcionDropdownPrimeNG(page, dd, 'Efectivo', '[Instrumento][Robusto]');
+    } catch (e) {
+      console.log(`[Instrumento] Intento ${i}/5: seleccionarOpcionDropdownPrimeNG falló: ${String(e)}. Intentando método anterior...`);
+      try {
+        await seleccionarDropdownFiltrableConReintentar(
+          page,
+          "Instrumento",
+          { index: 1 },
+          { maxIntentos: 3, esperaMs: 800, timeoutCampoMs: 8000, timeoutPanelMs: 6000, usarFiltro: false }
+        );
+      } catch (_) {
+        await seleccionarPrimerItem(dd).catch(() => {});
+      }
     }
 
     await page.waitForTimeout(400);
     const estadoPost = await leerEstadoInstrumento();
     console.log(`[Instrumento] Intento ${i}/5: estado final vacio=${estadoPost.vacio} texto='${estadoPost.texto}'`);
     if (!estadoPost.vacio) {
+      // Validar que sea efectivamente "Efectivo"
+      const textoFinal = estadoPost.texto.replace(/\s+/g, ' ').trim();
+      console.log(`[Instrumento][Robusto] valor final='${textoFinal}'`);
+      if (!/Efectivo/i.test(textoFinal)) {
+        console.log(`[Instrumento][Robusto] WARN: valor final no es 'Efectivo', reintentando...`);
+        continue;
+      }
       console.log(`[Instrumento] Intento ${i}/5: valor seleccionado correctamente.`);
       return;
     }
@@ -297,7 +374,13 @@ export async function seleccionarInstrumentoRobusto(page: import("@playwright/te
     await page.waitForTimeout(400);
     const estadoPost2 = await leerEstadoInstrumento();
     console.log(`[Instrumento] Intento ${i}/5: estado final intento 2 vacio=${estadoPost2.vacio} texto='${estadoPost2.texto}'`);
-    if (!estadoPost2.vacio) return;
+    if (!estadoPost2.vacio) {
+      const textoFinal2 = estadoPost2.texto.replace(/\s+/g, ' ').trim();
+      if (/Efectivo/i.test(textoFinal2)) {
+        console.log(`[Instrumento][Robusto] valor final='${textoFinal2}'`);
+        return;
+      }
+    }
 
     await page.waitForTimeout(800);
   }
