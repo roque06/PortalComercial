@@ -1134,20 +1134,9 @@ async function intentarAvanceRealHaciaTaller(
                 if (enPostProducto) {
                     console.log('[PostProducto] Verificando campos obligatorios antes de Continuar (retry)');
                     await asegurarTipoDeVivienda(page, (options as any)?.registro);
-                    const labelTipoVivienda = page
-                        .locator('label')
-                        .filter({ hasText: /^Tipo de vivienda$/i })
-                        .first()
-                        .locator('xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown"]][1]')
-                        .locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]')
-                        .first();
-                    const valorFinal = (
-                        (await labelTipoVivienda.textContent().catch(() => '')) ||
-                        (await labelTipoVivienda.getAttribute('aria-label').catch(() => '')) ||
-                        ''
-                    ).replace(/\s+/g, ' ').trim();
-                    if (!valorFinal || /Seleccione|Seleccionar/i.test(valorFinal)) {
-                        throw new Error(`[TipoVivienda][CRITICO] Tipo de vivienda sigue vacío antes de Continuar. valor='${valorFinal}'`);
+                    const tipoViviendaValido = await validarTipoViviendaAntesDeContinuar(page, (options as any)?.registro);
+                    if (!tipoViviendaValido) {
+                        throw new Error('[TipoVivienda][CRITICO] Tipo de vivienda sigue invalido antes de Continuar.');
                     }
                     const completoCampos = await asegurarPostProductoCompletoUnaVez(
                         page,
@@ -3192,28 +3181,35 @@ async function clickDepurarRobusto(page: Page, motivo = "") {
     }
 }
 
-async function detectarYCerrarClienteProspectoNoProcesable(page: Page): Promise<boolean> {
-    const modal = page.locator('.p-dialog:visible, [role="dialog"]:visible').filter({
-        hasText: /Cliente es prospecto|Código de cliente no registrado|cliente no está activo|No es posible continuar el proceso por esta vía/i
-    }).first();
+async function detectarModalClienteProspecto(page: Page): Promise<boolean> {
+    const titulo = page.getByText(/Cliente\s+es\s+prospecto/i).first();
+    const texto = page.getByText(/C[oó]digo\s+de\s+cliente\s+no\s+registrado|cliente\s+no\s+est[aá]\s+activo|No\s+es\s+posible\s+continuar\s+el\s+proceso\s+por\s+esta\s+v[ií]a/i).first();
 
-    const visible = await modal.isVisible({ timeout: 1500 }).catch(() => false);
-    if (!visible) return false;
+    const visibleTitulo = await titulo.isVisible({ timeout: 700 }).catch(() => false);
+    const visibleTexto = await texto.isVisible({ timeout: 700 }).catch(() => false);
+    return visibleTitulo || visibleTexto;
+}
 
-    console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto detectado: cliente no registrado o no activo');
-
-    const cerrar = modal.getByRole('button', { name: /Cerrar/i }).first();
-    if (await cerrar.isVisible({ timeout: 1000 }).catch(() => false)) {
-        await cerrar.click();
-        await modal.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => { });
-        console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado');
-    } else {
-        await page.keyboard.press('Escape').catch(() => { });
-        await modal.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => { });
-        console.log('[ClienteNuevo][SKIP] Modal Cliente es prospecto cerrado con Escape/fallback');
+async function cerrarModalClienteProspecto(page: Page): Promise<void> {
+    const cerrarBtn = page.getByRole('button', { name: /Cerrar/i }).first();
+    if (await cerrarBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await cerrarBtn.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(500);
+        console.log('[ClienteNuevo][Skip] Modal prospecto cerrado');
+        return;
     }
 
-    return true;
+    const xBtn = page.locator('button, [role="button"]').filter({ hasText: /^×$|^x$/i }).first();
+    if (await xBtn.isVisible({ timeout: 700 }).catch(() => false)) {
+        await xBtn.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(500);
+        console.log('[ClienteNuevo][Skip] Modal prospecto cerrado');
+        return;
+    }
+
+    await page.keyboard.press('Escape').catch(() => { });
+    await page.waitForTimeout(500);
+    console.log('[ClienteNuevo][Skip] Modal prospecto cerrado');
 }
 
 async function asegurarSeccionContactosDisponible(page: Page, identificacion?: string) {
@@ -3263,6 +3259,11 @@ async function asegurarSeccionContactosDisponible(page: Page, identificacion?: s
 
         if (intento === 3) {
             const idMsg = identificacion ? ` para '${identificacion}'` : '';
+            if (await detectarModalClienteProspecto(page)) {
+                console.log(`[ClienteNuevo][Skip] Cliente prospecto/no activo detectado${idMsg}. Cerrando modal y omitiendo registro.`);
+                await cerrarModalClienteProspecto(page);
+                throw new Error(`[OMITIR_REGISTRO][CLIENTE_PROSPECTO] Cliente prospecto/no activo${idMsg}`);
+            }
             console.log(`[ClienteNuevo][WARN] Contactos sigue sin aparecer en intento 3${idMsg}. Lanzando reintento de registro...`);
             throw new Error(`[REINTENTAR_REGISTRO][CONTACTOS_NO_VISIBLE] Contactos no apareció tras Depurar${idMsg}`);
         }
@@ -4799,18 +4800,180 @@ async function asegurarTipoDeVivienda(page: Page, data?: any): Promise<void> {
 
     console.log(`[TipoVivienda] Asegurando Tipo de vivienda valor='${valor}'`);
 
-    const seleccionado = await seleccionarDropdownPorLabelConReintento(
-        page,
-        /^Tipo de vivienda$/i,
-        valor,
-        '[TipoVivienda]'
-    );
+    const label = page.locator('label').filter({ hasText: /^Tipo de vivienda$/i }).first();
+    const scope = label
+        .locator('xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or contains(@class,"p-select")]][1]')
+        .first();
+    let dropdown = scope.locator('div.p-dropdown, [data-pc-name="dropdown"], .p-select').first();
 
-    if (!seleccionado || /Seleccione|Seleccionar/i.test(seleccionado)) {
-        throw new Error(`[TipoVivienda][CRITICO] Tipo de vivienda no quedó seleccionado. valor='${seleccionado}'`);
+    if (!(await dropdown.isVisible().catch(() => false))) {
+        dropdown = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, .p-select:visible').first();
     }
 
-    console.log(`[TipoVivienda] Tipo de vivienda seleccionado='${seleccionado}'`);
+    await dropdown.waitFor({ state: 'visible', timeout: 10000 });
+    console.log('[TipoVivienda] Dropdown localizado');
+
+    console.log('[TipoVivienda] leyendo valor inicial visual...');
+    const valorInicial = await leerValorVisualTipoVivienda(dropdown);
+    console.log(`[TipoVivienda] valor inicial visual='${valorInicial}'`);
+
+    if (esTipoViviendaPropia(valorInicial)) {
+        console.log(`[TipoVivienda] ya tiene valor valido equivalente a Propia='${valorInicial}'`);
+        console.log(`[TipoVivienda] Tipo de vivienda seleccionado='${valorInicial}'`);
+        return;
+    }
+
+    if (esValorTipoViviendaValido(valorInicial)) {
+        console.log(`[TipoVivienda] ya tiene valor valido='${valorInicial}'`);
+        console.log(`[TipoVivienda] Tipo de vivienda seleccionado='${valorInicial}'`);
+        return;
+    }
+
+    console.log(`[TipoVivienda] valor inicial invalido/vacio='${valorInicial}', seleccionando 'Propia'`);
+
+    console.log('[TipoVivienda] abriendo dropdown...');
+    const abierto = await abrirDropdownTipoVivienda(page, dropdown);
+    if (!abierto) {
+        throw new Error('[TipoVivienda][CRITICO] No se pudo abrir dropdown de Tipo de vivienda');
+    }
+
+    console.log('[TipoVivienda] buscando opcion Propia...');
+    const opciones = page.locator('.ng-dropdown-panel:visible .ng-option:visible, .ui-select-choices:visible .ui-select-choices-row:visible, [role="listbox"]:visible [role="option"]:visible');
+    const count = await opciones.count().catch(() => 0);
+    console.log(`[TipoVivienda] opciones visibles=${count}`);
+
+    for (let i = 0; i < Math.min(count, 20); i++) {
+        const txt = normalizarTextoCombo(await opciones.nth(i).innerText({ timeout: 300 }).catch(() => ''));
+        console.log(`[TipoVivienda] opcion[${i}]='${txt}'`);
+    }
+
+    let opcionPropia = opciones.filter({ hasText: /^(Propia|Casa\s+Propia)$/i }).first();
+    let opcionVisible = await opcionPropia.isVisible({ timeout: 800 }).catch(() => false);
+    if (!opcionVisible) {
+        opcionPropia = opciones.filter({ hasText: /Propia/i }).first();
+        opcionVisible = await opcionPropia.isVisible({ timeout: 800 }).catch(() => false);
+    }
+    console.log(`[TipoVivienda] opcion Propia visible=${opcionVisible}`);
+    if (!opcionVisible) {
+        throw new Error('[TipoVivienda][CRITICO] No se encontro opcion Propia');
+    }
+
+    console.log('[TipoVivienda] click opcion Propia');
+    await opcionPropia.click({ force: true });
+
+    let ultimoValor = '';
+    for (let intento = 1; intento <= 5; intento++) {
+        await page.waitForTimeout(500);
+        const final = await leerValorVisualTipoVivienda(dropdown);
+        console.log(`[TipoVivienda] valor final visual='${final}'`);
+        ultimoValor = final;
+        console.log(`[TipoVivienda] validacion intento=${intento} valor final visual='${final}'`);
+        if (esTipoViviendaPropia(final)) {
+            console.log(`[TipoVivienda] Tipo de vivienda seleccionado='${final}'`);
+            return;
+        }
+    }
+
+    throw new Error(`[TipoVivienda][CRITICO] No quedo seleccionado Propia. valorFinal='${ultimoValor}'`);
+}
+
+function esValorTipoViviendaValido(valor: string): boolean {
+    const t = normalizarTextoCombo(valor);
+    if (!t) return false;
+    if (/^[A-Z0-9]{4,}(\s+[A-Z0-9]{4,})+$/i.test(t)) return false;
+    if (/Por favor seleccione/i.test(t)) return false;
+    if (/Seleccione/i.test(t)) return false;
+    return /^(Propia|Casa\s+Propia|Alquilada|Casa\s+Alquilada|Familiar|Financiada|Otro|Otros)$/i.test(t);
+}
+
+function esTipoViviendaPropia(valor: string): boolean {
+    const t = normalizarTextoCombo(valor);
+    return /^(Propia|Casa\s+Propia)$/i.test(t);
+}
+
+async function leerValorVisualTipoVivienda(dropdown: Locator): Promise<string> {
+    console.log('[TipoVivienda] leyendo valor visual...');
+    const candidatos = [
+        dropdown.locator('.ng-value-label').first(),
+        dropdown.locator('.ui-select-match-text').first(),
+        dropdown.locator('.select2-selection__rendered').first(),
+        dropdown.locator('[class*="singleValue"]').first(),
+        dropdown.locator('[class*="placeholder"]').first(),
+        dropdown.locator('.p-dropdown-label, [data-pc-section="label"], [role="combobox"]').first(),
+    ];
+
+    for (let i = 0; i < candidatos.length; i++) {
+        const c = candidatos[i];
+        const visible = await c.isVisible({ timeout: 300 }).catch(() => false);
+        if (!visible) continue;
+        const txt = normalizarTextoCombo(await c.innerText({ timeout: 300 }).catch(() => ''));
+        console.log(`[TipoVivienda] candidato visual ${i}='${txt}'`);
+        if (txt) return txt;
+    }
+
+    const txtDropdown = normalizarTextoCombo(await dropdown.innerText({ timeout: 700 }).catch(() => ''));
+    console.log(`[TipoVivienda] texto dropdown='${txtDropdown}'`);
+    if (txtDropdown) return txtDropdown;
+    return '';
+}
+
+async function validarTipoViviendaAntesDeContinuar(page: Page, data?: any): Promise<boolean> {
+    console.log('[TipoVivienda][PreContinuar] validando...');
+    const label = page.locator('label').filter({ hasText: /^Tipo de vivienda$/i }).first();
+    const visible = await label.isVisible().catch(() => false);
+    if (!visible) return true;
+
+    const scope = label
+        .locator('xpath=ancestor::*[self::div or self::span][.//div[contains(@class,"p-dropdown") or @data-pc-name="dropdown" or contains(@class,"p-select")]][1]')
+        .first();
+    let dropdown = scope.locator('div.p-dropdown, [data-pc-name="dropdown"], .p-select').first();
+    if (!(await dropdown.isVisible().catch(() => false))) {
+        dropdown = page.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible, .p-select:visible').first();
+    }
+
+    const valorActual = await leerValorVisualTipoVivienda(dropdown);
+    const valido = esValorTipoViviendaValido(valorActual);
+    console.log(`[TipoVivienda][PreContinuar] valor visual='${valorActual}'`);
+    if (valido) {
+        console.log(`[TipoVivienda][PreContinuar] OK valor='${valorActual}'`);
+        return true;
+    }
+
+    console.log('[TipoVivienda][PreContinuar] invalido, reintentando seleccion');
+    await asegurarTipoDeVivienda(page, data);
+    const valorFinal = await leerValorVisualTipoVivienda(dropdown);
+    const validoFinal = esTipoViviendaPropia(valorFinal);
+    if (validoFinal) {
+        console.log("[TipoVivienda][PreContinuar] OK valor='Propia'");
+    } else {
+        console.log(`[TipoVivienda][PreContinuar] valor final invalido='${valorFinal}'`);
+    }
+    return validoFinal;
+}
+
+async function abrirDropdownTipoVivienda(page: Page, dropdown: Locator): Promise<boolean> {
+    await dropdown.scrollIntoViewIfNeeded().catch(() => { });
+    await page.waitForTimeout(300);
+
+    const box = await dropdown.boundingBox().catch(() => null);
+    if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 6 }).catch(() => { });
+        await page.waitForTimeout(150);
+        await page.mouse.click(box.x + box.width - 18, box.y + box.height / 2).catch(() => { });
+    } else {
+        await dropdown.click({ force: true, timeout: 1000 }).catch(() => { });
+    }
+
+    await page.waitForTimeout(600);
+
+    const hayOpciones = await page
+        .locator('.ng-dropdown-panel:visible .ng-option:visible, .ui-select-choices:visible .ui-select-choices-row:visible, [role="listbox"]:visible [role="option"]:visible')
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+
+    console.log(`[TipoVivienda] dropdown abierto=${hayOpciones}`);
+    return hayOpciones;
 }
 
 async function asegurarDireccionEnCorrespondencia(page: Page) {
@@ -5754,11 +5917,13 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
         }
 
         await clickDepurarRobusto(page, 'primero');
+        await page.waitForTimeout(800);
 
-        const esProspecto = await detectarYCerrarClienteProspectoNoProcesable(page);
+        const esProspecto = await detectarModalClienteProspecto(page);
         if (esProspecto) {
-            console.log(`[ClienteNuevo][SKIP] Omitiendo registro '${registro.identificacion}' por cliente prospecto/no activo`);
-            throw new Error(`[OMITIDO] Cliente prospecto/no activo para '${registro.identificacion}'`);
+            console.log(`[ClienteNuevo][Skip] Modal Cliente es prospecto detectado tras Depurar para '${registro.identificacion}'. Omitiendo registro.`);
+            await cerrarModalClienteProspecto(page);
+            throw new Error(`[OMITIR_REGISTRO][CLIENTE_PROSPECTO] Cliente prospecto/no activo para '${registro.identificacion}'`);
         }
 
         const mpnCasoActivo = await extraerCasoActivoMpn(page);
@@ -9050,9 +9215,9 @@ test('Cuenta Efectivo Cliente Nuevo - desde Excel', async () => {
             },
             onRegistroError: async (_registro, errorMsg) => {
                 const esCritico = /\[CRITICO\]/i.test(errorMsg);
-                const esOmitido = /\[OMITIDO\]/i.test(errorMsg);
+                const esOmitido = /\[OMITIDO\]|\[OMITIR_REGISTRO\]\[CLIENTE_PROSPECTO\]/i.test(errorMsg);
                 if (esOmitido) {
-                    console.log(`[RegistroRunner] Registro omitido: ${errorMsg}`);
+                    console.log(`[Runner][SKIP] ${errorMsg}. Continuando con siguiente registro.`);
                     return 'continue';
                 }
                 if (session.continueOnRegistroError && !esCritico) {
