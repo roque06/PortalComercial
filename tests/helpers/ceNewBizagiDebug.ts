@@ -1162,58 +1162,120 @@ async function seleccionarFalsoPositivoEnComboLexisDebug(
     console.log(`${label} pendiente=${pendiente}; seleccionando Falso Positivo`);
     if (!pendiente) return true;
 
-    await combo.scrollIntoViewIfNeeded().catch(() => {});
-    await combo.click({ force: true }).catch(() => {});
-    await bizagiPage.waitForTimeout(250);
-
-    const ariaControls = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
-    console.log(`${label} aria-controls='${ariaControls}'`);
-
-    let opciones: Locator;
-    let totalOpciones = 0;
-    if (ariaControls) {
-        opciones = bizagiPage.locator(`#${ariaControls} li:visible, #${ariaControls} [role="option"]:visible`);
-        totalOpciones = await opciones.count().catch(() => 0);
-        if (totalOpciones > 0) {
-            console.log(`${label} usando opciones por aria-controls`);
+    const obtenerOpcionesLexisAcotadas = async (): Promise<{ opciones: Locator; count: number; origen: string }> => {
+        const ariaControls = (await combo.getAttribute('aria-controls').catch(() => '')) || '';
+        console.log(`${label} aria-controls='${ariaControls}'`);
+        if (ariaControls) {
+            const ariaEscaped = cssEscapeDebug(ariaControls);
+            const porAria = bizagiPage.locator(
+                `#${ariaEscaped} .ui-select-choices-row:visible, ` +
+                `#${ariaEscaped} .ui-select-choices-row-inner:visible, ` +
+                `#${ariaEscaped} [role="option"]:visible, ` +
+                `#${ariaEscaped} li:visible`
+            );
+            const countAria = await porAria.count().catch(() => 0);
+            if (countAria > 0) return { opciones: porAria, count: countAria, origen: 'aria-controls' };
         }
-    } else {
-        opciones = bizagiPage.locator('li[role="option"]:visible, [role="option"]:visible');
-    }
 
-    if (!ariaControls || totalOpciones === 0) {
-        console.log(`${label}[WARN] usando fallback global de opciones`);
-        opciones = bizagiPage.locator('li[role="option"]:visible, [role="option"]:visible, .ui-selectmenu-menu:visible li:visible');
-        totalOpciones = await opciones.count().catch(() => 0);
-    }
+        const listboxVisible = bizagiPage.locator('[role="listbox"]:visible [role="option"]:visible, .ui-select-choices:visible .ui-select-choices-row:visible, .ui-select-dropdown:visible .ui-select-choices-row:visible');
+        const countListbox = await listboxVisible.count().catch(() => 0);
+        if (countListbox > 0) return { opciones: listboxVisible, count: countListbox, origen: 'listbox-visible' };
 
-    console.log(`${label} opciones visibles=${totalOpciones}`);
+        const fallbackAcotado = bizagiPage.locator('.ui-select-dropdown:visible li:visible, .ui-select-choices:visible li:visible, .ui-selectmenu-menu:visible li:visible');
+        const countFallback = await fallbackAcotado.count().catch(() => 0);
+        return { opciones: fallbackAcotado, count: countFallback, origen: 'fallback-acotado' };
+    };
 
-    let opcionFalso = opciones.filter({ hasText: /^\s*Falso\s*Positivo\s*$/i }).first();
-    if (!(await opcionFalso.isVisible().catch(() => false))) {
-        opcionFalso = opciones.filter({ hasText: /Falso\s*Positivo/i }).first();
-    }
+    for (let intento = 1; intento <= 5; intento++) {
+        console.log(`${label} abriendo dropdown intento=${intento}`);
+        await abrirComboLexisHumano(bizagiPage, combo, label);
 
-    if (await opcionFalso.isVisible().catch(() => false)) {
+        let opcionesInfo = await obtenerOpcionesLexisAcotadas();
+        console.log(`${label} opciones por ${opcionesInfo.origen}=${opcionesInfo.count}`);
+
+        if (opcionesInfo.count <= 0) {
+            await combo.focus().catch(() => {});
+            await bizagiPage.keyboard.press('Alt+ArrowDown').catch(() => {});
+            await bizagiPage.waitForTimeout(250);
+            await bizagiPage.keyboard.press('ArrowDown').catch(() => {});
+            await bizagiPage.waitForTimeout(250);
+            opcionesInfo = await obtenerOpcionesLexisAcotadas();
+            console.log(`${label} opciones por ${opcionesInfo.origen}=${opcionesInfo.count}`);
+        }
+
+        const opcionesInfoRetry = opcionesInfo;
+        console.log(`${label} opciones visibles=${opcionesInfoRetry.count}`);
+
+        let opcionFalso = opcionesInfoRetry.opciones.filter({ hasText: /^\s*Falso\s+Positivo\s*$/i }).first();
+        let opcionVisible = await opcionFalso.isVisible({ timeout: 500 }).catch(() => false);
+        if (!opcionVisible) {
+            opcionFalso = opcionesInfoRetry.opciones.filter({ hasText: /Falso\s+Positivo/i }).first();
+            opcionVisible = await opcionFalso.isVisible({ timeout: 500 }).catch(() => false);
+        }
+
+        console.log(`${label} opción Falso Positivo visible=${opcionVisible}`);
+        if (!opcionVisible) {
+            await bizagiPage.waitForTimeout(350);
+            continue;
+        }
+
         console.log(`${label} Opción 'Falso Positivo' encontrada`);
         await opcionFalso.click({ force: true }).catch(() => {});
-    } else {
-        // fallback por teclado
-        await combo.focus().catch(() => {});
-        await bizagiPage.keyboard.press('ArrowDown').catch(() => {});
-        await bizagiPage.waitForTimeout(200);
-        await bizagiPage.keyboard.press('Enter').catch(() => {});
+
+        let estadoFinal = '';
+        for (let p = 1; p <= 5; p++) {
+            await bizagiPage.waitForTimeout(400);
+            estadoFinal = normalizarTextoCombo(
+                (await combo.inputValue().catch(() => '')) ||
+                (await combo.getAttribute('value').catch(() => '')) ||
+                (await combo.getAttribute('title').catch(() => '')) ||
+                ''
+            );
+            console.log(`${label} estadoFinal intento=${p} '${estadoFinal}'`);
+            if (esAccionLexisFalsoPositivo(estadoFinal)) {
+                console.log(`${label} estadoFinal='${estadoFinal}'`);
+                return true;
+            }
+        }
     }
 
-    await bizagiPage.waitForTimeout(500);
-    await combo.press('Tab').catch(() => {});
-    await bizagiPage.waitForTimeout(300);
-
-    const estadoFinal = await combo.inputValue().catch(async () => {
-        return await combo.getAttribute('value').catch(() => '') || '';
-    });
+    const estadoFinal = normalizarTextoCombo(
+        (await combo.inputValue().catch(() => '')) ||
+        (await combo.getAttribute('value').catch(() => '')) ||
+        (await combo.getAttribute('title').catch(() => '')) ||
+        ''
+    );
     console.log(`${label} estadoFinal='${estadoFinal}'`);
     return esAccionLexisFalsoPositivo(estadoFinal);
+}
+
+async function abrirComboLexisHumano(page: Page, combo: Locator, labelLog: string): Promise<void> {
+    await combo.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(300);
+    const box = await combo.boundingBox().catch(() => null);
+    if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 6 }).catch(() => {});
+        await page.waitForTimeout(150);
+        await page.mouse.click(box.x + box.width - 12, box.y + box.height / 2).catch(() => {});
+    } else {
+        await combo.click({ force: true }).catch(() => {});
+    }
+    await page.waitForTimeout(700);
+    let opened = await page.locator('[role="listbox"]:visible, .ui-select-choices:visible, .ui-select-dropdown:visible').first().isVisible({ timeout: 400 }).catch(() => false);
+    if (!opened) {
+        await combo.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(300);
+        if (box) {
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+            await page.waitForTimeout(250);
+        }
+        await combo.focus().catch(() => {});
+        await page.keyboard.press('Alt+ArrowDown').catch(() => {});
+        await page.waitForTimeout(250);
+        await page.keyboard.press('ArrowDown').catch(() => {});
+        opened = await page.locator('[role="listbox"]:visible, .ui-select-choices:visible, .ui-select-dropdown:visible').first().isVisible({ timeout: 500 }).catch(() => false);
+    }
+    console.log(`${labelLog} dropdown abierto=${opened}`);
 }
 
 export async function completarLexisNexisOtrasCoincidenciasDebug(bizagiPage: Page): Promise<boolean> {
@@ -1447,90 +1509,63 @@ export async function resolverModoBizagiDebug(bizagiPage: Page): Promise<'OFAC' 
     return modoResuelto;
 }
 
-export async function seleccionarSolicitarAclaracionesNoDebug(bizagiPage: Page): Promise<boolean> {
+async function asegurarSolicitarAclaracionesNoDebug(bizagiPage: Page): Promise<boolean> {
     console.log('[DEBUG-BIZAGI][Aclaraciones] Buscando campo Solicitar Aclaraciones');
-
     const label = bizagiPage.getByText(/Solicitar\s+Aclaraciones\??/i).first();
     const labelVisible = await label.isVisible({ timeout: 2500 }).catch(() => false);
     console.log(`[DEBUG-BIZAGI][Aclaraciones] label visible=${labelVisible}`);
+    if (!labelVisible) return false;
 
-    if (!labelVisible) {
-        return false;
-    }
-
+    const contenedor = label.locator('xpath=ancestor::*[self::div or self::section or self::td][.//input[@type="radio"]][1]').first();
+    await label.scrollIntoViewIfNeeded().catch(() => {});
     console.log('[DEBUG-BIZAGI][Aclaraciones] intentando seleccionar No');
 
-    let seleccionado = false;
+    for (let intento = 1; intento <= 3; intento++) {
+        const noLabel = contenedor.locator('label:visible, span:visible, div:visible').filter({ hasText: /^No$/i }).first();
+        const radioNo = contenedor.locator('input[type="radio"][value="false"], input[type="radio"][value="No"], input[type="radio"][value="0"]').first();
 
-    // 1) Radio/input/label cercano
-    const contenedor = label.locator('xpath=ancestor::*[self::div or self::span or self::section][1]').first();
-    const noLabel = contenedor.getByText(/^No$/i).first();
-    if (await noLabel.isVisible().catch(() => false)) {
-        await noLabel.click({ force: true }).catch(() => {});
-        seleccionado = true;
-    }
+        if (await noLabel.isVisible({ timeout: 600 }).catch(() => false)) {
+            console.log('[DEBUG-BIZAGI][Aclaraciones] click No por contenedor cercano');
+            await noLabel.click({ force: true }).catch(() => {});
+        } else if (await radioNo.isVisible({ timeout: 600 }).catch(() => false)) {
+            await radioNo.click({ force: true }).catch(() => {});
+        }
 
-    // 2) Buscar input radio cercano y marcar
-    if (!seleccionado) {
-        const radioNo = bizagiPage.locator('input[type="radio"][value="false"], input[type="radio"][value="No"], input[type="radio"][value="0"]').first();
         if (await radioNo.isVisible().catch(() => false)) {
-            await radioNo.click({ force: true }).catch(async () => {
-                await radioNo.evaluate((el) => {
-                    const i = el as HTMLInputElement;
-                    i.checked = true;
-                    i.dispatchEvent(new Event('input', { bubbles: true }));
-                    i.dispatchEvent(new Event('change', { bubbles: true }));
-                }).catch(() => {});
+            const box = await radioNo.boundingBox().catch(() => null);
+            if (box) {
+                await bizagiPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => {});
+            }
+        }
+
+        await bizagiPage.waitForTimeout(300);
+
+        const estado = await contenedor.evaluate((root) => {
+            const radios = Array.from(root.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+            const radiosNo = radios.filter((r) => /false|no|0/i.test(String(r.value || '')));
+            const radioNoChecked = radiosNo.some((r) => r.checked);
+            const ariaNo = Array.from(root.querySelectorAll('[aria-checked="true"]')).some((el) => /\bNo\b/i.test((el as HTMLElement).innerText || ''));
+            const claseNo = Array.from(root.querySelectorAll('label, span, div')).some((el) => {
+                const txt = ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+                if (!/^No$/i.test(txt)) return false;
+                const cls = ((el as HTMLElement).className || '').toString();
+                return /active|selected|checked|highlight/i.test(cls);
             });
-            seleccionado = true;
-        }
+            return { radioNoChecked, ariaNo, claseNo };
+        }).catch(() => ({ radioNoChecked: false, ariaNo: false, claseNo: false }));
+
+        const validacionFinalNo = !!(estado.radioNoChecked || estado.ariaNo || estado.claseNo);
+        console.log(`[DEBUG-BIZAGI][Aclaraciones] radioNo checked=${estado.radioNoChecked}`);
+        console.log(`[DEBUG-BIZAGI][Aclaraciones] ariaNo=${estado.ariaNo}`);
+        console.log(`[DEBUG-BIZAGI][Aclaraciones] validacionFinalNo=${validacionFinalNo}`);
+        if (validacionFinalNo) return true;
     }
 
-    // 3) Fallback geométrico
-    if (!seleccionado) {
-        const labelBox = await label.boundingBox().catch(() => null);
-        if (labelBox) {
-            const noCandidates = bizagiPage.locator('label:visible, span:visible, div:visible').filter({ hasText: /^No$/i });
-            const totalNo = await noCandidates.count().catch(() => 0);
-            let bestIdx = -1;
-            let bestScore = Number.POSITIVE_INFINITY;
-            for (let i = 0; i < totalNo; i++) {
-                const c = noCandidates.nth(i);
-                const box = await c.boundingBox().catch(() => null);
-                if (!box) continue;
-                const dy = Math.abs((box.y + box.height / 2) - (labelBox.y + labelBox.height / 2));
-                const dx = Math.max(0, labelBox.x - box.x);
-                const score = dy * 10 + dx;
-                if (box.x >= labelBox.x && score < bestScore) {
-                    bestScore = score;
-                    bestIdx = i;
-                }
-            }
-            if (bestIdx >= 0) {
-                await noCandidates.nth(bestIdx).click({ force: true }).catch(() => {});
-                seleccionado = true;
-            }
-        }
-    }
+    throw new Error('[DEBUG-BIZAGI][Aclaraciones][CRITICO] No quedó seleccionado No');
+}
 
-    await bizagiPage.waitForTimeout(400);
-
-    const validacionFinalNo = await bizagiPage.evaluate(() => {
-        const body = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-        const radios = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
-        const algunoNoChecked = radios.some(r => r.checked && (/false|no|0/i.test(String(r.value || ''))));
-        const ariaTrueNo = Array.from(document.querySelectorAll('[aria-checked="true"]')).some((el) => /\bNo\b/i.test((el as HTMLElement).innerText || ''));
-        return algunoNoChecked || ariaTrueNo || /Solicitar\s+Aclaraciones/i.test(body);
-    }).catch(() => false);
-
-    console.log(`[DEBUG-BIZAGI][Aclaraciones] No seleccionado=${seleccionado}`);
-    console.log(`[DEBUG-BIZAGI][Aclaraciones] validacionFinalNo=${validacionFinalNo}`);
-
-    if (!seleccionado || !validacionFinalNo) {
-        throw new Error('[DEBUG-BIZAGI][Aclaraciones][CRITICO] No se pudo seleccionar Solicitar Aclaraciones=No');
-    }
-
-    return true;
+export async function seleccionarSolicitarAclaracionesNoDebug(bizagiPage: Page): Promise<boolean> {
+    return asegurarSolicitarAclaracionesNoDebug(bizagiPage);
 }
 
 async function aceptarModalConfirmacionBizagiDebug(bizagiPage: Page): Promise<boolean> {
@@ -1583,6 +1618,12 @@ async function aceptarModalConfirmacionBizagiDebug(bizagiPage: Page): Promise<bo
 
 export async function clickSiguienteGestionCoincidenciasDebug(bizagiPage: Page, opts?: { requiereConfirmacion?: boolean }): Promise<void> {
     console.log('[DEBUG-BIZAGI][Siguiente] Buscando botón Siguiente');
+    console.log('[DEBUG-BIZAGI][Siguiente] Revalidando Aclaraciones=No antes de Siguiente');
+    const aclaracionesNoOk = await asegurarSolicitarAclaracionesNoDebug(bizagiPage).catch(() => false);
+    console.log(`[DEBUG-BIZAGI][Siguiente] AclaracionesNoOk=${aclaracionesNoOk}`);
+    if (!aclaracionesNoOk) {
+        throw new Error('[DEBUG-BIZAGI][Siguiente][CRITICO] No se pudo asegurar Aclaraciones=No antes de Siguiente');
+    }
 
     const candidatos = [
         bizagiPage.locator('input#formButton1[value="Siguiente"]:visible').first(),
@@ -1608,6 +1649,26 @@ export async function clickSiguienteGestionCoincidenciasDebug(bizagiPage: Page, 
 
     if (!confirmacionOk) {
         console.log('[DEBUG-BIZAGI][Siguiente][WARN] No apareció modal de confirmación después de Siguiente');
+        const diag = await bizagiPage.evaluate(() => {
+            const txt = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+            const errores = txt.match(/Es requerido|Por favor seleccione|Debe seleccionar/gi) || [];
+            const aclaracionesNoFinal = Array.from(document.querySelectorAll('input[type="radio"]')).some((r) => {
+                const i = r as HTMLInputElement;
+                return i.checked && /false|no|0/i.test(String(i.value || ''));
+            }) || Array.from(document.querySelectorAll('[aria-checked="true"]')).some((el) => /\bNo\b/i.test((el as HTMLElement).innerText || ''));
+            return {
+                erroresVisibles: Array.from(new Set(errores)).join(' | '),
+                aclaracionesNoFinal,
+                bodyPreview: txt.slice(0, 320),
+            };
+        }).catch(() => ({ erroresVisibles: '', aclaracionesNoFinal: false, bodyPreview: '' }));
+        const btnVisible = await btn.isVisible().catch(() => false);
+        const btnEnabled = await btn.isEnabled().catch(() => false);
+        console.log('[DEBUG-BIZAGI][Siguiente][Diag] modalVisible=false');
+        console.log(`[DEBUG-BIZAGI][Siguiente][Diag] erroresVisibles='${diag.erroresVisibles}'`);
+        console.log(`[DEBUG-BIZAGI][Siguiente][Diag] aclaracionesNoFinal=${diag.aclaracionesNoFinal}`);
+        console.log(`[DEBUG-BIZAGI][Siguiente][Diag] btnSiguienteVisible=${btnVisible} btnSiguienteEnabled=${btnEnabled}`);
+        console.log(`[DEBUG-BIZAGI][Siguiente][Diag] bodyPreview='${diag.bodyPreview}'`);
         if (opts?.requiereConfirmacion) {
             throw new Error('[DEBUG-BIZAGI][Siguiente][CRITICO] No se confirmó el modal Bizagi después de Siguiente');
         }
@@ -1617,4 +1678,38 @@ export async function clickSiguienteGestionCoincidenciasDebug(bizagiPage: Page, 
 export async function guardarYSiguienteDebug(bizagiPage: Page): Promise<void> {
     // Conservado por compatibilidad: ahora solo avanza con Siguiente (sin Guardar)
     await clickSiguienteGestionCoincidenciasDebug(bizagiPage);
+}
+
+export type ModoBizagiGestionCoincidencias = 'OFAC' | 'LEXIS' | 'MIXTO';
+
+export async function completarGestionCoincidenciasBizagiComun(
+    page: Page,
+    modo: ModoBizagiGestionCoincidencias,
+    options?: {
+        avanzar?: boolean;
+        logPrefix?: string;
+    },
+): Promise<void> {
+    const logPrefix = options?.logPrefix || '[DEBUG-BIZAGI]';
+    const avanzar = options?.avanzar !== false;
+
+    console.log(`${logPrefix}[Modo] Ejecutando modo=${modo}`);
+
+    if (modo === 'MIXTO' || modo === 'OFAC') {
+        const ofacMs = Date.now();
+        await aprobarOfacGestionCoincidenciasDebug(page);
+        console.log(`${logPrefix}[OFAC] OFAC completado`);
+        console.log(`[Perf][Bizagi][OFAC] totalMs=${Date.now() - ofacMs}`);
+    }
+
+    if (modo === 'MIXTO' || modo === 'LEXIS') {
+        const lexisMs = Date.now();
+        await completarLexisNexisOtrasCoincidenciasDebug(page);
+        console.log(`[Perf][Bizagi][Lexis] totalMs=${Date.now() - lexisMs}`);
+    }
+
+    if (!avanzar) return;
+
+    await seleccionarSolicitarAclaracionesNoDebug(page);
+    await clickSiguienteGestionCoincidenciasDebug(page, { requiereConfirmacion: true });
 }

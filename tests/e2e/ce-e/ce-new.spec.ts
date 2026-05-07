@@ -64,6 +64,10 @@ import { asegurarSeccionProductosVisible } from '../../helpers/portal/productosS
 import { launchPortalSession } from '../../../src/infra/playwright/browserSession';
 import { abrirArchivoAlFinal, limpiarEvidenciasTemporales } from '../../../src/services/common/evidenciasService';
 import { closeBrowserSession, runRegistros } from '../../../src/services/common/registroRunner';
+import {
+    completarGestionCoincidenciasBizagiComun,
+    type ModoBizagiGestionCoincidencias,
+} from '../../helpers/ceNewBizagiDebug';
 
 const capturas: string[] = [];
 const cumplimientoMpnsProcesados = new Set<string>();
@@ -1027,7 +1031,7 @@ async function intentarAvanceRealHaciaTaller(
                 await diagnosticarPantallaProductoPostAgregar(page, options.tipoCuenta).catch(() => { });
                 throw new Error('[Producto][CRITICO] No se confirmo producto agregado; no se puede continuar.');
             }
-            console.log('[Producto][AvanceReal] producto confirmado; haciendo click en Siguiente/Continuar');
+            console.log('[Producto][AvanceRapido] producto confirmado; click Continuar sin probe post-producto previo');
         }
 
         const verificacionEspecialAntes = await procesarVerificacionesEspeciales(page).catch((e) => {
@@ -1060,6 +1064,10 @@ async function intentarAvanceRealHaciaTaller(
         await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
         const urlDespuesClic = page.url();
         console.log(`[Continuar] esperarFinActualizando completado. url=${urlDespuesClic}`);
+        const destinoRapido = await procesarVerificacionesEspeciales(page).catch(() => null);
+        if (destinoRapido?.tipo === 'cumplimiento') {
+            console.log(`[Producto][AvanceRapido] destino detectado=Verificaciones`);
+        }
 
         // Esperar ventana extendida por post-producto (antes de clasificar destino)
         const ventanaPostProductoMs = FAST_UI ? 10000 : 15000;
@@ -1871,7 +1879,8 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                     const keyProducto = `${String(registro?.identificacion ?? '').trim()}|${String(tipoACargar).trim()}`.toUpperCase();
                     console.log(`[Producto][Target] registro=${registro?.identificacion ?? 'N/A'} tipoCuentaObjetivo='${tipoACargar}' key=${keyProducto}`);
 
-                    if (productoProcesadoPorRegistro.has(keyProducto)) {
+                    const guardYaProcesado = productoProcesadoPorRegistro.has(keyProducto);
+                    if (guardYaProcesado) {
                         console.log(`[Producto][GuardUnico] Producto ya procesado para key=${keyProducto}; no se volverá a seleccionar/agregar`);
                     } else {
                         console.log(`[Producto][GuardUnico] key=${keyProducto} no procesado, continuando`);
@@ -1881,7 +1890,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
 
                     // Verificar si producto ya está agregado
                     console.log('[Producto][Trace] verificando si producto ya está agregado');
-                    const productoYaAgregado = await Promise.race([
+                    let productoYaAgregado = await Promise.race([
                         productoAgregadoComoTarjetaVisible(page, tipoACargar),
                         new Promise<boolean>((resolve) => setTimeout(() => {
                             console.log('[Producto][GuardEstricto][WARN] timeout verificando productoYaAgregado; se asumirá NO agregado');
@@ -1891,10 +1900,25 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                         console.log(`[Producto][GuardEstricto][WARN] error verificando productoYaAgregado: ${String(e)}; se asumirá NO agregado`);
                         return false;
                     });
+                    if (guardYaProcesado && productoYaAgregado) {
+                        console.log(`[Producto][GuardUnico] producto ya procesado y tarjeta visible; avanzando sin re-seleccionar`);
+                    }
                     console.log(`[Producto][Trace] productoYaAgregadoFinal=${productoYaAgregado}`);
                     if (productoYaAgregado) {
                         console.log('[Producto] Producto ya está agregado, saltando agregación');
                     } else {
+                        const seccionRapida = await localizarSeccionProductos(page).catch(() => page.locator('body'));
+                        console.log(`[Producto][Rapido] inicio categoria='Cuentas de Efectivo' producto='${tipoACargar}'`);
+                        console.log('[Producto][Rapido] pantalla Productos detectada; seleccionando categoría inmediatamente');
+                        const rapidoRes = await seleccionarCategoriaYProductoRapido(page, seccionRapida, 'Cuentas de Efectivo', tipoACargar);
+                        if (rapidoRes.ok) {
+                            await etapaSeccionProductosPostSeleccion(page, registro, seccionRapida);
+                            const confirmadoRapido = await productoAgregadoVisible(page, tipoACargar).catch(() => false);
+                            if (!confirmadoRapido) {
+                                throw new Error(`[Producto][CRITICO] Ruta rápida no confirmó producto agregado. producto='${tipoACargar}'`);
+                            }
+                            console.log('[Producto][Rapido] selección y post-agregado completados');
+                        } else {
                         // Usar estrategia legacy de localización que funciona en Certificado-ex.spec.ts
                         console.log('[Producto][Legacy] resultadoAvance=productos; usando localizador legacy de Certificado como referencia técnica');
                         console.log('[Producto][Legacy] Categoria objetivo=\'Cuentas de Efectivo\'');
@@ -2074,6 +2098,7 @@ async function continuarResolviendoGestionDocumentalSiPide(page: Page, options?:
                             throw new Error(`[Producto][Legacy][CRITICO] No se pudo confirmar producto agregado después de selección. producto='${tipoACargar}'`);
                         }
                         console.log('[Producto][Legacy] producto agregado visible=true');
+                        }
                     }
 
                     // Confirmación final
@@ -3210,6 +3235,13 @@ async function cerrarModalClienteProspecto(page: Page): Promise<void> {
     await page.keyboard.press('Escape').catch(() => { });
     await page.waitForTimeout(500);
     console.log('[ClienteNuevo][Skip] Modal prospecto cerrado');
+}
+
+async function prepararPortalParaSiguienteRegistro(page: Page): Promise<void> {
+    console.log('[Runner][SKIP] preparando Portal para siguiente registro');
+    await cerrarModalClienteProspecto(page).catch(() => { });
+    await page.keyboard.press('Escape').catch(() => { });
+    await page.waitForTimeout(300);
 }
 
 async function asegurarSeccionContactosDisponible(page: Page, identificacion?: string) {
@@ -5309,6 +5341,85 @@ async function completarDireccionPostProducto(page: Page) {
         return { ok: false, valor: '' };
     }
 
+    async function seleccionarSectorDireccionRapido(
+        currentPage: Page,
+        modalDireccionScope: Locator,
+        valorSector = 'Agua Dulce',
+    ): Promise<boolean> {
+        const tSector = Date.now();
+        console.log(`[Direccion][SectorRapido] inicio valor='${valorSector}'`);
+        const dropdowns = modalDireccionScope.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible');
+        const count = await dropdowns.count().catch(() => 0);
+        if (count <= 5) return false;
+        const dropdown = dropdowns.nth(5);
+        await dropdown.scrollIntoViewIfNeeded().catch(() => { });
+        await dropdown.click({ force: true }).catch(() => { });
+        await currentPage.waitForTimeout(250);
+
+        const paneles = currentPage.locator('.ng-dropdown-panel:visible, .ng-select-container:visible, [role="listbox"]:visible, .ui-select-choices:visible');
+        const panelVisible = await paneles.first().isVisible({ timeout: 1200 }).catch(() => false);
+        if (!panelVisible) return false;
+
+        const searchInput = currentPage.locator(
+            '.ng-dropdown-panel:visible input:visible, .ui-select-dropdown:visible input:visible, [role="listbox"]:visible input:visible, .ui-select-choices:visible input:visible'
+        ).first();
+        const inputVisible = await searchInput.isVisible({ timeout: 500 }).catch(() => false);
+        console.log(`[Direccion][SectorRapido] inputBusqueda visible=${inputVisible}`);
+        if (inputVisible) {
+            console.log('[Direccion][SectorRapido] usando búsqueda interna');
+            await searchInput.fill('').catch(() => { });
+            await searchInput.fill(valorSector).catch(() => { });
+            console.log(`[Direccion][SectorRapido] fill='${valorSector}'`);
+            await currentPage.waitForTimeout(400);
+        } else {
+            await currentPage.keyboard.type(valorSector).catch(() => { });
+            await currentPage.waitForTimeout(400);
+        }
+
+        const opciones = currentPage.locator(
+            '.ng-dropdown-panel:visible .ng-option:visible, ' +
+            '.ng-dropdown-panel:visible [role="option"]:visible, ' +
+            '[role="listbox"]:visible [role="option"]:visible, ' +
+            '.ui-select-choices:visible .ui-select-choices-row:visible'
+        );
+        const opcionesCount = await opciones.count().catch(() => 0);
+        console.log(`[Direccion][SectorRapido] opciones filtradas=${opcionesCount}`);
+        let opcion = opciones.filter({ hasText: new RegExp(`^${escapeRegExp(valorSector)}$`, 'i') }).first();
+        let visible = await opcion.isVisible({ timeout: 700 }).catch(() => false);
+        if (!visible) {
+            opcion = opciones.filter({ hasText: new RegExp(escapeRegExp(valorSector), 'i') }).first();
+            visible = await opcion.isVisible({ timeout: 700 }).catch(() => false);
+        }
+        console.log(`[Direccion][SectorRapido] opcionExacta visible=${visible}`);
+        if (!visible) {
+            await currentPage.keyboard.press('Enter').catch(() => { });
+            await currentPage.waitForTimeout(300);
+        } else {
+            const txt = ((await opcion.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+            console.log(`[Direccion][SectorRapido] opción exacta visible='${txt}'`);
+            console.log('[Direccion][SectorRapido] click opcion exacta');
+            await opcion.click({ force: true }).catch(() => { });
+        }
+        await currentPage.keyboard.press('Escape').catch(() => { });
+        await currentPage.waitForTimeout(250);
+        await modalDireccionScope.locator('label').filter({ hasText: /^Referencia$/i }).first().click({ force: true }).catch(() => { });
+        await currentPage.waitForTimeout(120);
+
+        const valorFinal = await leerValorRapido(/^Sector$/i);
+        const panelAbiertoPost = await paneles.first().isVisible({ timeout: 300 }).catch(() => false);
+        const ok = /Agua\s+Dulce/i.test(valorFinal);
+        if (ok && panelAbiertoPost) {
+            await currentPage.keyboard.press('Escape').catch(() => { });
+        }
+        const panelAbiertoPostFinal = await paneles.first().isVisible({ timeout: 300 }).catch(() => false);
+        console.log(`[Direccion][SectorRapido] valorFinal='${valorFinal}'`);
+        console.log(`[Direccion][SectorRapido] panelAbiertoPost=${panelAbiertoPostFinal}`);
+        console.log(`[Direccion][SectorRapido] seleccionado=${ok}`);
+        console.log(`[Perf][Direccion][Sector] totalMs=${Date.now() - tSector}`);
+        if (ok) return true;
+        return false;
+    }
+
     async function esperarCargaDireccionSiguiente(
         currentPage: Page,
         modalDireccionScope: Locator,
@@ -5386,6 +5497,7 @@ async function completarDireccionPostProducto(page: Page) {
         throw new Error(`[Direccion][CRITICO] ${nombre} no cargó después del paso anterior.`);
     }
 
+    const tDireccion = Date.now();
     await llenarTextoRapido(/Calle.*Avenida.*Autopista/i, randomTexto('Calle'));
     await llenarTextoRapido(/Nombre edificio/i, randomTexto('Edificio'), false).catch(() => false);
     await llenarTextoRapido(/N[uú]mero casa.*edificio/i, String(randomInt(1, 999)));
@@ -5404,9 +5516,15 @@ async function completarDireccionPostProducto(page: Page) {
     await esperarCargaDireccionSiguiente(page, modalDireccion, 4, 'Localidad');
 
     const localidad = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 4, 'Localidad');
-    await esperarCargaDireccionSiguiente(page, modalDireccion, 5, 'Sector');
-
-    const sector = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 5, 'Sector');
+    let sector = { ok: false, valor: '' };
+    const sectorRapidoOk = await seleccionarSectorDireccionRapido(page, modalDireccion, 'Agua Dulce').catch(() => false);
+    if (sectorRapidoOk) {
+        sector = { ok: true, valor: 'Agua Dulce' };
+    } else {
+        console.log('[Direccion][SectorRapido][WARN] no encontró opción rápida; usando fallback visual existente');
+        await esperarCargaDireccionSiguiente(page, modalDireccion, 5, 'Sector');
+        sector = await seleccionarDropdownDireccionPorIndiceVisual(page, modalDireccion, 5, 'Sector');
+    }
 
     let regionValor = region.valor || await leerValorRapido(/^Regi(?:o|ó)n$/i);
     console.log(`[Direccion] Región seleccionada rapido=true valor='${regionValor}'`);
@@ -5530,6 +5648,7 @@ async function completarDireccionPostProducto(page: Page) {
         throw new Error('[Direccion] El modal de direccion no cerro tras 3 intentos de Aceptar.');
     }
     console.log('[Direccion] Modal Dirección cerrado');
+    console.log(`[Perf][Direccion] totalMs=${Date.now() - tDireccion}`);
     return true;
 }
 
@@ -5964,6 +6083,11 @@ async function etapaFlujoRegistro(page: Page, registro: RegistroExcel) {
 
         const estaEnPasoDatosCliente = await asegurarSeccionContactosDisponible(page, registro.identificacion);
         if (!estaEnPasoDatosCliente) {
+            if (await detectarModalClienteProspecto(page)) {
+                console.log(`[ClienteNuevo][Skip] Cliente prospecto/no activo detectado antes de error de Contactos para '${registro.identificacion}'. Omitiendo registro.`);
+                await cerrarModalClienteProspecto(page);
+                throw new Error(`[OMITIR_REGISTRO][CLIENTE_PROSPECTO] Cliente prospecto/no activo para '${registro.identificacion}'`);
+            }
             const mpnCasoActivoTardio = await extraerCasoActivoMpn(page);
             if (mpnCasoActivoTardio) {
                 console.log(`[CasoActivo] Detectado tardio ${mpnCasoActivoTardio} antes de Contactos. Cancelando en Bizagi...`);
@@ -6063,6 +6187,10 @@ async function etapaValidacionesPrevias(page: Page, registro?: RegistroExcel) {
 
 const escapeRegexText = (value: string) =>
     escapeRegexTextShared(value);
+
+function escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 const esValorDropdownVacio = (value: string) => {
     return esValorDropdownVacioShared(value);
@@ -7591,6 +7719,53 @@ async function diagnosticarPantallaProductoPostAgregar(page: Page, tipoCuenta: s
     };
 }
 
+async function avanzarInmediatoDesdeProductoConfirmado(
+    page: Page,
+    tipoCuentaObjetivo: string,
+    keyProducto: string,
+): Promise<'verificaciones' | 'post-producto' | 'gestion-doc' | 'productos' | 'desconocido'> {
+    console.log(`[Producto][AvanceInmediato] producto confirmado key=${keyProducto}; click Continuar inmediato`);
+    const tarjetaVisible = await productoAgregadoComoTarjetaVisible(page, tipoCuentaObjetivo).catch(() => false);
+    if (!tarjetaVisible) {
+        console.log('[Producto][AvanceInmediato][WARN] tarjeta no visible; no se avanza inmediato');
+        return 'productos';
+    }
+
+    const btnContinuar = getBotonContinuar(page);
+    const visible = await btnContinuar.isVisible().catch(() => false);
+    const enabled = visible ? await btnContinuar.isEnabled().catch(() => false) : false;
+    console.log(`[Producto][AvanceInmediato] botonContinuar visible=${visible} enabled=${enabled}`);
+    if (!visible || !enabled) return 'desconocido';
+
+    console.log('[Producto][AvanceInmediato] click Continuar');
+    await btnContinuar.scrollIntoViewIfNeeded().catch(() => { });
+    await btnContinuar.click({ force: true }).catch(() => { });
+    await esperarFinActualizandoSolicitud(page, FAST_UI ? 12000 : 18000).catch(() => false);
+
+    const verif = await procesarVerificacionesEspeciales(page).catch(() => null);
+    if (verif?.tipo === 'cumplimiento') {
+        console.log('[Producto][AvanceInmediato] destino=Verificaciones');
+        return 'verificaciones';
+    }
+    const enPost = await asegurarPantallaPostProductoAntesDeTaller(page).catch(() => false);
+    if (enPost) {
+        console.log('[Producto][AvanceInmediato] destino=PostProducto');
+        return 'post-producto';
+    }
+    const gestionDoc = await requiereAdjuntarDocumentoIdentidad(page).catch(() => false);
+    if (gestionDoc) {
+        console.log('[Producto][AvanceInmediato] destino=GestionDoc');
+        return 'gestion-doc';
+    }
+    const enProductos = await estaEnPantallaProductos(page).catch(() => false);
+    if (enProductos) {
+        console.log('[Producto][AvanceInmediato] destino=productos');
+        return 'productos';
+    }
+    console.log('[Producto][AvanceInmediato] destino=desconocido');
+    return 'desconocido';
+}
+
 async function etapaSeccionProductosPostSeleccion(
     page: Page,
     registro: RegistroExcel,
@@ -7651,7 +7826,8 @@ async function etapaSeccionProductosPostSeleccion(
         console.log(`[Producto][GuardUnico] reentrada tarjetaProductoDetectada=${tarjetaProductoDetectada} mensajeVacioBloqueante=${mensajeVacioBloqueante}`);
 
         if (tarjetaProductoDetectada && !mensajeVacioBloqueante) {
-            console.log('[Producto] producto ya agregado visible; listo para avanzar a Siguiente');
+            console.log('[Producto][GuardUnico] producto ya procesado/tarjeta visible; avance inmediato sin re-seleccionar');
+            await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyProducto).catch(() => 'desconocido');
             return;
         }
 
@@ -8074,13 +8250,40 @@ async function etapaSeccionProductosPostSeleccion(
             const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
             productoProcesadoPorRegistro.add(keyAhora);
             console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+            const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+            if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                return;
+            }
             break;
         }
 
         if (aceptoConfirmacion) {
             console.log('[Producto][PostAgregar] Confirmación aceptada; esperando tarjeta final con polling...');
-            const aparecioConPolling = await esperarProductoFinalVisibleDespuesDeConfirmacion(page, registro.tipoCuenta, 15000);
+            const aparecioConPolling = await esperarProductoFinalVisibleDespuesDeConfirmacion(page, registro.tipoCuenta, 6000);
             console.log(`[Producto][PostAgregar] aparecioConPolling=${aparecioConPolling}`);
+
+            if (!aparecioConPolling) {
+                console.log('[Producto][PostAgregar][Poll] timeout corto sin señales completas; ejecutando diagnóstico rápido');
+                const diagnosticoRapido = await diagnosticarPantallaProductoPostAgregar(page, registro.tipoCuenta).catch((e) => {
+                    console.log(`[Producto][PostAgregar][WARN] diagnóstico rápido falló: ${String(e)}`);
+                    return null;
+                });
+                if (diagnosticoRapido?.tarjetaProductoDetectada && !diagnosticoRapido?.mensajeVacioBloqueante) {
+                    console.log('[Producto][PostAgregar] tarjeta producto detectada por diagnóstico rápido; evitando retry');
+                    productoAgregado = true;
+                    marcarProductoConfirmado(registro);
+                    const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+                    productoProcesadoPorRegistro.add(keyAhora);
+                    console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                    const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+                    if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                        console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                        return;
+                    }
+                    break;
+                }
+            }
 
             // Reintento único si el modal cierra pero no agrega
             if (!aparecioConPolling && intentoProducto === 1) {
@@ -8106,6 +8309,11 @@ async function etapaSeccionProductosPostSeleccion(
                         const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
                         productoProcesadoPorRegistro.add(keyAhora);
                         console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                        const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+                        if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                            console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                            return;
+                        }
                         break;
                     }
                 }
@@ -8118,6 +8326,11 @@ async function etapaSeccionProductosPostSeleccion(
                 const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
                 productoProcesadoPorRegistro.add(keyAhora);
                 console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+                if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                    console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                    return;
+                }
                 break;
             } else {
                 console.log('[Producto][PostAgregar][WARN] Confirmación aceptada pero polling inicial no detectó tarjeta; ejecutando diagnóstico final');
@@ -8133,6 +8346,11 @@ async function etapaSeccionProductosPostSeleccion(
                     const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
                     productoProcesadoPorRegistro.add(keyAhora);
                     console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+                    const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+                    if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                        console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                        return;
+                    }
                     break;
                 } else {
                     throw new Error(`[CRITICO] Confirmación aceptada pero producto '${registro.tipoCuenta}' no visible en UI después de esperar 15s.`);
@@ -8148,6 +8366,11 @@ async function etapaSeccionProductosPostSeleccion(
             const keyAhora = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
             productoProcesadoPorRegistro.add(keyAhora);
             console.log(`[Producto][GuardUnico] marcado producto procesado key=${keyAhora}`);
+            const destinoInmediato = await avanzarInmediatoDesdeProductoConfirmado(page, registro.tipoCuenta, keyAhora).catch(() => 'desconocido');
+            if (destinoInmediato !== 'productos' && destinoInmediato !== 'desconocido') {
+                console.log(`[Producto][AvanceInmediato] avance completado destino=${destinoInmediato}; saliendo de etapa producto`);
+                return;
+            }
             break;
         }
 
@@ -8190,10 +8413,27 @@ async function etapaSeccionProductosPostSeleccion(
 }
 
 async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
+    const tProducto = Date.now();
+    const keyProducto = `${String(registro.identificacion ?? '').trim()}|${String(registro.tipoCuenta ?? '').trim()}`.toUpperCase();
+    const yaProcesadoGuard = productoProcesadoPorRegistro.has(keyProducto);
+    const tarjetaVisibleGuard = await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false);
+    const modalAbiertoGuard = await modalConfiguracionProductoVisible(page).catch(() => false);
+    if (yaProcesadoGuard && modalAbiertoGuard) {
+        throw new Error('[Producto][CRITICO] Modal de configuración abierto después de producto ya procesado; ruta duplicada detectada');
+    }
+    if ((yaProcesadoGuard || tarjetaVisibleGuard) && !modalAbiertoGuard) {
+        console.log(`[Producto][GuardUnico] producto ya procesado/tarjeta visible; no se selecciona categoría/producto key=${keyProducto}`);
+        console.log('[Producto][GuardUnico] producto ya procesado y tarjeta visible; avanzando sin re-seleccionar');
+        await asegurarModalProductoCerradoOSinConfigurar(page);
+        console.log(`[Perf][Producto] totalMs=${Date.now() - tProducto}`);
+        return;
+    }
+
     if (!await modalConfiguracionProductoVisible(page).catch(() => false)
         && await productoAgregadoComoTarjetaVisible(page, registro.tipoCuenta).catch(() => false)) {
         console.log('[Producto] Producto ya visible antes de seleccionar; se omite selección/agregar');
         marcarProductoConfirmado(registro);
+        console.log(`[Perf][Producto] totalMs=${Date.now() - tProducto}`);
         return;
     }
     let flujoNuevoActivado = true;
@@ -8273,24 +8513,19 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
             },
         });
 
-        await seleccionarCategoriaEnSeccionProductos(page, seccionProductos);
-        await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
-
-        // Esperar a que el dropdown de Producto se pueble tras seleccionar la categoria.
-        // Angular lanza un fetch async al cambiar la categoria; el dropdown de Producto
-        // puede mostrar "" o "Seleccione" hasta que llega la respuesta (no siempre hay
-        // spinner "Actualizando"). Espera fija + polling por items en el panel.
-        await esperarFinActualizandoSolicitud(page, FAST_UI ? 8000 : 15000).catch(() => { });
-        await page.waitForTimeout(FAST_UI ? 2000 : 3500); // margen para fetch async de productos
-
         const seccionActualizada = await localizarSeccionProductos(page);
         await seccionActualizada.waitFor({ state: 'visible', timeout: 10000 }).catch(() => { });
 
-        // Se remueve la espera manual y apertura del dropdown aqui, 
-        // ya que seleccionarProductoEnSeccionProductos ya maneja la espera interna 
-        // de forma mas robusta a traves de seleccionarDropdownEnScopePorTexto.
-
-        await seleccionarProductoEnSeccionProductos(page, seccionActualizada, registro);
+        const rapido = await seleccionarCategoriaYProductoRapido(page, seccionActualizada, 'Cuentas de Efectivo', registro.tipoCuenta);
+        if (!rapido.ok) {
+            const motivoRapido = 'motivo' in rapido ? rapido.motivo : 'sin detalle';
+            console.log(`[Producto][Rapido][WARN] ruta rápida no completó selección (${motivoRapido}); usando fallback legacy controlado`);
+            await seleccionarCategoriaEnSeccionProductos(page, seccionActualizada);
+            await cerrarModalCancelarProcesoSiVisible(page).catch(() => false);
+            await esperarFinActualizandoSolicitud(page, FAST_UI ? 8000 : 15000).catch(() => { });
+            await page.waitForTimeout(FAST_UI ? 1200 : 2200);
+            await seleccionarProductoEnSeccionProductos(page, seccionActualizada, registro);
+        }
         return etapaSeccionProductosPostSeleccion(page, registro, seccionActualizada);
     }
 
@@ -8729,6 +8964,7 @@ async function etapaSeccionProductos(page: Page, registro: RegistroExcel) {
         }
         throw new Error(`[CRITICO] No se detecta el producto agregado en pantalla: '${registro.tipoCuenta}'.`);
     }
+    console.log(`[Perf][Producto] totalMs=${Date.now() - tProducto}`);
 }
 
 async function estaEnPantallaTallerProductos(page: Page) {
@@ -9218,6 +9454,7 @@ test('Cuenta Efectivo Cliente Nuevo - desde Excel', async () => {
                 const esOmitido = /\[OMITIDO\]|\[OMITIR_REGISTRO\]\[CLIENTE_PROSPECTO\]/i.test(errorMsg);
                 if (esOmitido) {
                     console.log(`[Runner][SKIP] ${errorMsg}. Continuando con siguiente registro.`);
+                    await prepararPortalParaSiguienteRegistro(page).catch(() => { });
                     return 'continue';
                 }
                 if (session.continueOnRegistroError && !esCritico) {
@@ -10027,6 +10264,107 @@ async function obtenerCombosAccionLexisMetaBizagi(page: Page): Promise<{ combos:
     });
 }
 
+type ResultadoSeleccionProductoRapida =
+    | { ok: true; modalAbierto: true }
+    | { ok: true; tarjetaYaVisible: true }
+    | { ok: false; motivo: string };
+
+async function asegurarModalProductoCerradoOSinConfigurar(page: Page): Promise<void> {
+    const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+    if (!modalVisible) return;
+    console.log('[Producto][ModalGuard] modal de configuración abierto antes de avanzar; intentando completar/cerrar correctamente');
+    const tieneCamposConfiguracion = await page.getByText(/Balance promedio|Tasa|Moneda/i).first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (tieneCamposConfiguracion) {
+        throw new Error('[Producto][CRITICO] Modal de configuración abierto en estado inesperado; debe completarse antes de continuar');
+    }
+}
+
+async function seleccionarCategoriaYProductoRapido(
+    page: Page,
+    seccionProductos: Locator,
+    categoriaObjetivo: string,
+    tipoCuentaObjetivo: string,
+): Promise<ResultadoSeleccionProductoRapida> {
+    const tSel = Date.now();
+    console.log(`[Producto][Rapido] inicio categoria='${categoriaObjetivo}' producto='${tipoCuentaObjetivo}'`);
+
+    if (!await modalConfiguracionProductoVisible(page).catch(() => false)
+        && await productoAgregadoComoTarjetaVisible(page, tipoCuentaObjetivo).catch(() => false)) {
+        console.log('[Producto][Rapido] producto ya agregado como tarjeta; omitiendo selección');
+        console.log(`[Perf][Producto][Seleccion] totalMs=${Date.now() - tSel}`);
+        return { ok: true, tarjetaYaVisible: true };
+    }
+
+    const tCategoria = Date.now();
+    const estadoCategoria = await leerValorDropdownEnScope(seccionProductos, /Categor[ií]a de producto/i, { timeoutMs: 900 }).catch(() => '');
+    if (/Cuentas\s+de\s+Efectivo/i.test(estadoCategoria || '')) {
+        console.log(`[Producto][Rapido] categoría ya seleccionada='${estadoCategoria}'`);
+    } else {
+        const dropdownCategoria = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(0);
+        await dropdownCategoria.scrollIntoViewIfNeeded().catch(() => { });
+        await dropdownCategoria.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(250);
+        const opcionesCategoria = page.locator('.ng-dropdown-panel:visible .ng-option:visible, [role="listbox"]:visible [role="option"]:visible, .ui-select-choices:visible .ui-select-choices-row:visible');
+        const opcionCategoria = opcionesCategoria.filter({ hasText: /^Cuentas\s+de\s+Efectivo$/i }).first();
+        if (!(await opcionCategoria.isVisible({ timeout: 3000 }).catch(() => false))) {
+            return { ok: false, motivo: 'categoria no visible en ruta rápida' };
+        }
+        await opcionCategoria.click({ force: true }).catch(() => { });
+        console.log(`[Producto][Rapido] categoría seleccionada='${categoriaObjetivo}'`);
+    }
+    console.log(`[Perf][Producto][Categoria] totalMs=${Date.now() - tCategoria}`);
+
+    console.log('[Producto][Rapido] esperando habilitación/lista de Producto tras categoría');
+    await page.waitForTimeout(1200);
+
+    const tProductoDrop = Date.now();
+    const dropdownProducto = seccionProductos.locator('div.p-dropdown:visible, [data-pc-name="dropdown"]:visible').nth(1);
+    const opcionesProducto = page.locator('.ng-dropdown-panel:visible .ng-option:visible, [role="listbox"]:visible [role="option"]:visible, .ui-select-choices:visible .ui-select-choices-row:visible');
+    let countOpciones = 0;
+    for (let intento = 1; intento <= 10; intento++) {
+        await dropdownProducto.click({ force: true }).catch(() => { });
+        await page.waitForTimeout(300);
+        countOpciones = await opcionesProducto.count().catch(() => 0);
+        console.log(`[Producto][Rapido] producto opciones visibles=${countOpciones} intento=${intento}`);
+        if (countOpciones > 0) break;
+        await page.waitForTimeout(400);
+    }
+    console.log(`[Perf][Producto][ProductoDropdown] totalMs=${Date.now() - tProductoDrop}`);
+    if (countOpciones <= 0) return { ok: false, motivo: 'producto sin opciones visibles en ruta rápida' };
+
+    const regexTipo = new RegExp(`^${escapeRegexText(tipoCuentaObjetivo)}$`, 'i');
+    const codigo = extraerCodigoProducto(tipoCuentaObjetivo);
+    const regexCodigo = codigo ? new RegExp(`\\b${escapeRegexText(codigo)}\\b`, 'i') : null;
+
+    let opcionProducto = opcionesProducto.filter({ hasText: regexTipo }).first();
+    let encontrado = await opcionProducto.isVisible({ timeout: 900 }).catch(() => false);
+    if (!encontrado && regexCodigo) {
+        opcionProducto = opcionesProducto.filter({ hasText: regexCodigo }).first();
+        encontrado = await opcionProducto.isVisible({ timeout: 900 }).catch(() => false);
+        if (encontrado) console.log('[Producto][Rapido] producto encontrado por código');
+    }
+    if (!encontrado) return { ok: false, motivo: 'producto objetivo no visible en ruta rápida' };
+    await opcionProducto.click({ force: true }).catch(() => { });
+    console.log(`[Producto][Rapido] producto encontrado por texto exacto='${tipoCuentaObjetivo}'`);
+
+    await page.waitForTimeout(FAST_UI ? 220 : 600);
+    const modalVisible = await modalConfiguracionProductoVisible(page).catch(() => false);
+    if (modalVisible) {
+        console.log('[Producto][Rapido] modal de configuración abierto; continuando a completar modal');
+        console.log(`[Perf][Producto][Seleccion] totalMs=${Date.now() - tSel}`);
+        return { ok: true, modalAbierto: true };
+    }
+
+    const productoUI = await detectarProductoSeleccionadoEnUI(page, seccionProductos, tipoCuentaObjetivo).catch(() => false);
+    if (productoUI || await productoAgregadoComoTarjetaVisible(page, tipoCuentaObjetivo).catch(() => false)) {
+        console.log(`[Perf][Producto][Seleccion] totalMs=${Date.now() - tSel}`);
+        return { ok: true, tarjetaYaVisible: true };
+    }
+
+    console.log(`[Perf][Producto][Seleccion] totalMs=${Date.now() - tSel}`);
+    return { ok: false, motivo: 'no abrió modal ni confirmó tarjeta' };
+}
+
 async function localizarComboPorCandidatoBizagi(page: Page, c: ComboLexisMeta): Promise<Locator> {
     const inputs = page.locator('input[role="combobox"]:visible, input.ui-select-data.ui-selectmenu-value:visible, .ui-selectmenu input:visible');
     const count = await inputs.count().catch(() => 0);
@@ -10191,22 +10529,12 @@ async function completarGestionCoincidenciasBizagiPorModo(bizagiPage: Page, modo
     }
     await bizagiPage.bringToFront().catch(() => {});
     console.log(`[Cumplimiento][Bizagi] completarGestionCoincidenciasBizagiPorModo inicio modo=${modo} url=${bizagiPage.url()}`);
-
-    let ofacOk = true;
-    let lexisOk = true;
-    const body = await bizagiPage.locator('body').innerText({ timeout: 3000 }).catch(() => '');
-    const hayOfac = /Coincidencias\s+OFAC|Acci[oó]n\s+Coincidencias\s+OFAC|Motivo\s+Coincidencias\s+OFAC/i.test(body);
-    const hayLexis = /Lexis\s+Nexis|Otras\s+Coincidencias/i.test(body);
-
-    if (modo === 'OFAC' || modo === 'MIXTO') ofacOk = await aprobarOfacGestionCoincidenciasBizagi(bizagiPage);
-    if (modo === 'LEXIS' || modo === 'MIXTO') lexisOk = await completarLexisNexisOtrasCoincidenciasBizagi(bizagiPage);
-
-    console.log(`[Cumplimiento][Bizagi] validacionFinal hayOfac=${hayOfac} resultOfac=${ofacOk} hayLexis=${hayLexis} resultLexis=${lexisOk}`);
-    if (hayOfac && !ofacOk) throw new Error('[Cumplimiento][Bizagi][CRITICO] OFAC detectado pero no fue completado');
-    if (hayLexis && !lexisOk) throw new Error('[Cumplimiento][Bizagi][CRITICO] MIXTO no puede completar con LEXIS=false');
-
-    await seleccionarSolicitarAclaracionesNoBizagi(bizagiPage);
-    await clickSiguienteGestionCoincidenciasBizagi(bizagiPage);
-    await aceptarModalConfirmacionBizagi(bizagiPage);
+    // El procesamiento OFAC/LEXIS se reutiliza desde ceNewBizagiDebug.ts para evitar divergencias con el debug estable.
+    const tBizagi = Date.now();
+    await completarGestionCoincidenciasBizagiComun(bizagiPage, modo as ModoBizagiGestionCoincidencias, {
+        avanzar: true,
+        logPrefix: '[Cumplimiento][Bizagi]',
+    });
+    console.log(`[Perf][Bizagi][${modo}] totalMs=${Date.now() - tBizagi}`);
     return true;
 }
